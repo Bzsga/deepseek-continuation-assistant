@@ -161,7 +161,7 @@ def test_running_restart_is_uncertain_queue_resumes(settings):
 def test_cancel_in_flight_accounts_response_without_saving_entries(settings, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     calls = []
-    async def provider(*args):
+    async def provider(*args, trace=None):
         calls.append(1)
         entered.set()
         while not release.is_set():
@@ -187,7 +187,7 @@ def test_cancel_in_flight_accounts_response_without_saving_entries(settings, mon
 
 def test_shutdown_during_call_preserves_uncertain_reservation(settings, monkeypatch):
     entered = threading.Event()
-    async def provider(*args):
+    async def provider(*args, trace=None):
         entered.set()
         await asyncio.sleep(60)
     monkeypatch.setattr("app.runner.organize", provider)
@@ -374,7 +374,7 @@ def test_changed_configuration_never_dispatches_stale_paid_job(settings, monkeyp
     with TestClient(app) as client:
         headers = auth(client, app)
         job = client.post("/v1/jobs", headers=headers, json=payload()).json()
-    async def forbidden_provider(*args):
+    async def forbidden_provider(*args, trace=None):
         pytest.fail("stale configuration caused a provider call")
     monkeypatch.setattr("app.runner.organize", forbidden_provider)
     restarted = create_app(replace(paid, worker_enabled=True, **change))
@@ -387,7 +387,7 @@ def test_changed_configuration_never_dispatches_stale_paid_job(settings, monkeyp
 
 def test_provider_total_deadline_holds_reservation(settings, monkeypatch):
     calls = []
-    async def endless_provider(*args):
+    async def endless_provider(*args, trace=None):
         calls.append(1)
         while True:
             await asyncio.sleep(0.01)
@@ -437,7 +437,7 @@ def test_existing_sqlite_users_and_usage_migrate_without_reset(settings):
 def test_inflight_keeps_original_runtime_settings(settings, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     observed = []
-    async def provider(call_settings, snapshot, messages):
+    async def provider(call_settings, snapshot, messages, *, trace=None):
         observed.append((call_settings.model, call_settings.api_key, snapshot["model"]))
         if len(observed) == 1:
             entered.set()

@@ -273,6 +273,25 @@ class RuntimeWatchTests(unittest.TestCase):
                                                    "schema_other_fields": invalid}), {})
         self.assertEqual(watch.safe_diagnostic({"schema_layout": PRIVATE, "schema_normalized": 1}), {})
 
+    def test_failure_capture_reference_is_safe_and_does_not_split_incident(self):
+        capture_id = "11111111-1111-4111-8111-111111111111"
+        safe = {"failure_capture_state": "saved", "failure_capture_id": capture_id,
+                "failure_capture_expires_at": 1794000000}
+        self.assertEqual(watch.safe_diagnostic({**safe, "failure_capture_body": PRIVATE}), safe)
+        self.assertEqual(watch.safe_diagnostic({"failure_capture_id": PRIVATE,
+                                               "failure_capture_state": PRIVATE,
+                                               "failure_capture_expires_at": True}), {})
+        row = {"id": "job-a", "terminal_at": 105, "status": "failed", "count_state": "used",
+               "message": "[schema] validation failed diagnostic=" + json.dumps(safe)}
+        first = watch.job_event(row)
+        changed = {**safe, "failure_capture_id": "22222222-2222-4222-8222-222222222222",
+                   "failure_capture_expires_at": 1794000001}
+        second = watch.job_event({**row, "id": "job-b",
+                                  "message": "[schema] validation failed diagnostic=" + json.dumps(changed)})
+        self.assertEqual(first["fingerprint"], second["fingerprint"])
+        self.assertNotEqual(first["event_id"], second["event_id"])
+        self.assertEqual(first["diagnostic"]["failure_capture_id"], capture_id)
+
     def test_journal_exports_only_error_classes_and_allowed_frames(self):
         body = '\n'.join([
             "Traceback (most recent call last):",

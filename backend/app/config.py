@@ -38,6 +38,8 @@ class Settings:
     worker_enabled: bool = True
     max_body_bytes: int = 65536
     max_response_bytes: int = 65536
+    failure_artifacts_enabled: bool = True
+    failure_artifacts_ttl_hours: int = 24
 
     @classmethod
     def from_env(cls):
@@ -65,6 +67,10 @@ class Settings:
         return result
 
     def validate(self):
+        if type(self.failure_artifacts_enabled) is not bool:
+            raise ValueError("FAILURE_ARTIFACTS_ENABLED 必须为 true 或 false")
+        if type(self.failure_artifacts_ttl_hours) is not int or not 1 <= self.failure_artifacts_ttl_hours <= 168:
+            raise ValueError("FAILURE_ARTIFACTS_TTL_HOURS 须为 1 到 168 的整数")
         if not 0 <= self.daily_limit <= 1_000_000 or not 0 <= self.user_daily_limit <= 1_000_000:
             raise ValueError("每日次数上限须在 0 到 1000000 之间")
         if not self.model.strip() or len(self.model) > 128 or any(character.isspace() for character in self.model):

@@ -636,7 +636,13 @@ def normalize_entries(content: str, messages, *, warnings=None, diagnostic=None)
     return result
 
 
-async def organize(settings: Settings, snapshot, messages):
+async def organize(settings: Settings, snapshot, messages, *, trace=None):
+    if trace is not None:
+        trace.request = None
+        trace.response_body.clear()
+        trace.http_status = None
+        trace.body_read_complete = False
+        trace.response_truncated = False
     prompt_version = None
     try:
         snapshot_version = snapshot.get("protocol_version", 2)
@@ -666,8 +672,36 @@ async def organize(settings: Settings, snapshot, messages):
     started = time.monotonic()
     envelope = None
     http_status = None
-    data = bytearray()
+    data = trace.response_body if trace is not None else bytearray()
     body_read_complete = False
+
+    async def read_body(response, *, raw=False):
+        nonlocal body_read_complete
+        stream = response.aiter_raw() if raw else response.aiter_bytes()
+        async for chunk in stream:
+            observed_size = len(data) + len(chunk)
+            if observed_size > settings.max_response_bytes:
+                data.extend(memoryview(chunk)[:max(0, settings.max_response_bytes - len(data))])
+                if trace is not None:
+                    trace.response_truncated = True
+                return observed_size
+            data.extend(chunk)
+        body_read_complete = True
+        if trace is not None:
+            trace.body_read_complete = True
+        return None
+
+    async def read_error_body(response, *, raw=False):
+        # Capture a bounded error body without replacing the known HTTP error,
+        # extending the overall request deadline, or issuing another request.
+        remaining = settings.provider_timeout_seconds - (time.monotonic() - started) - 0.05
+        if remaining <= 0:
+            return
+        try:
+            await asyncio.wait_for(read_body(response, raw=raw), timeout=min(2.0, remaining))
+        except Exception:
+            # Partial bytes remain in the shared buffer. Never log body/errors.
+            pass
 
     def diagnostics(response_bytes=None):
         result = response_diagnostics(envelope, http_status, len(data) if response_bytes is None else response_bytes)
@@ -691,6 +725,8 @@ async def organize(settings: Settings, snapshot, messages):
             model = snapshot["model"].lower()
             if model == "deepseek-flash" or re.match(r"^deepseek-v4(?:[.-]|$)", model):
                 request_body["reasoning_effort"] = "none"
+        if trace is not None:
+            trace.request = request_body
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(settings.provider_timeout_seconds),
             follow_redirects=False, trust_env=False,
@@ -702,22 +738,24 @@ async def organize(settings: Settings, snapshot, messages):
                 json=request_body,
             ) as response:
                 http_status = response.status_code
+                if trace is not None:
+                    trace.http_status = http_status
                 if response.status_code != 200:
+                    await read_error_body(response, raw=response.headers.get("content-encoding", "identity") != "identity")
                     label = {502: "上游网关异常", 503: "上游服务暂不可用", 504: "上游网关超时"}.get(http_status, "上游请求失败")
                     return ProviderOutcome("uncertain", diagnostic_message(
                         f"[transport] {label}（HTTP {http_status}）。请求结果尚未确认，本次次数已计入用量，费用预留已保留，不会自动重试。",
                         diagnostics()), [])
                 if response.headers.get("content-encoding", "identity") != "identity":
+                    await read_error_body(response, raw=True)
                     return ProviderOutcome("uncertain", diagnostic_message(
                         "[transport] 上游响应编码不兼容，结果尚未确认，费用预留已保留，不会自动重试。",
                         diagnostics()), [])
-                async for chunk in response.aiter_bytes():
-                    if len(data) + len(chunk) > settings.max_response_bytes:
-                        return ProviderOutcome("uncertain", diagnostic_message(
-                            "[content_shape] 服务方响应超过大小上限，费用预留已保留。",
-                            diagnostics(len(data) + len(chunk))), [])
-                    data.extend(chunk)
-                body_read_complete = True
+                oversized = await read_body(response)
+                if oversized is not None:
+                    return ProviderOutcome("uncertain", diagnostic_message(
+                        "[content_shape] 服务方响应超过大小上限，费用预留已保留。",
+                        diagnostics(oversized)), [])
         stage = "envelope_json"
         envelope = json.loads(data)
     except (httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError, RecursionError) as error:
@@ -766,7 +804,8 @@ async def organize(settings: Settings, snapshot, messages):
             raise ProtocolError("content_filter")
         if finish_reason != "stop":
             raise ProtocolError("content_shape")
-        # Only content is consumed. reasoning_content is never stored or exposed.
+        # Only content is used as a result. Raw failure capture is private and
+        # handled by Runner; reasoning_content never enters the result/API.
         message = choices[0].get("message")
         if not isinstance(message, dict):
             raise ProtocolError("content_shape")

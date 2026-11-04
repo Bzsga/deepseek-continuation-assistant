@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from app.config import Settings
+from app.failure_artifacts import ProviderTrace
 from app.provider import (
     ProtocolError, json_candidate_diagnostics, normalize_entries, organize, parse_generated_document,
     provider_messages, snapshot_for, source_aliases,
@@ -76,6 +77,53 @@ def mock_http(monkeypatch, response):
 def execute(settings, messages):
     snapshot, _ = snapshot_for(settings, messages)
     return asyncio.run(organize(settings, snapshot, messages))
+
+
+def test_optional_trace_keeps_wire_request_and_shared_body_without_changing_request(settings, messages, monkeypatch):
+    response = envelope(PRIVATE_MARKER)
+    requests = mock_http(monkeypatch, response)
+    snapshot, _ = snapshot_for(settings, messages)
+    trace = ProviderTrace()
+    original_buffer = trace.response_body
+    outcome = asyncio.run(organize(settings, snapshot, messages, trace=trace))
+    assert outcome.status == "failed" and len(requests) == 1
+    assert trace.request == requests[0] and trace.request["messages"] == provider_messages(messages, 4096)
+    assert trace.response_body is original_buffer and json.loads(trace.response_body) == response
+    assert trace.http_status == 200 and trace.body_read_complete and not trace.response_truncated
+    assert "headers" not in trace.request and settings.api_key not in json.dumps(trace.request)
+    assert PRIVATE_MARKER not in repr(trace) and PRIVATE_MARKER not in outcome.message
+
+
+@pytest.mark.parametrize("mode", ["complete_error", "partial_error", "oversized"])
+def test_trace_retains_bounded_error_body_without_changing_error_or_retry(settings, messages, monkeypatch, mode):
+    calls, real_client = [], httpx.AsyncClient
+    raw = PRIVATE_MARKER.encode() if mode != "oversized" else b"x" * 5000
+
+    class PartialBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield raw
+            raise httpx.ReadError(PRIVATE_MARKER)
+
+    def handler(request):
+        calls.append(request)
+        if mode == "partial_error":
+            return httpx.Response(502, stream=PartialBody())
+        return httpx.Response(200 if mode == "oversized" else 502, content=raw)
+
+    def client(**kwargs):
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("app.provider.httpx.AsyncClient", client)
+    bounded = replace(settings, max_response_bytes=4096)
+    snapshot, _ = snapshot_for(bounded, messages)
+    trace = ProviderTrace()
+    outcome = asyncio.run(organize(bounded, snapshot, messages, trace=trace))
+    assert outcome.status == "uncertain" and len(calls) == 1
+    assert trace.response_body == raw[:4096]
+    assert trace.response_truncated is (mode == "oversized")
+    assert trace.body_read_complete is (mode == "complete_error")
+    assert ("HTTP 502" in outcome.message) is (mode != "oversized")
+    assert PRIVATE_MARKER not in outcome.message and outcome.cost_micros == 0
 
 
 def test_eight_long_sources_use_alias_wire_and_restore_original_ids(settings, messages, monkeypatch):

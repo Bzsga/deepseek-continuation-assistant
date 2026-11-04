@@ -123,6 +123,15 @@ def safe_diagnostic(value):
             name: fields[name] for name in sorted(USAGE_FIELDS)
             if isinstance(fields.get(name), str) and fields[name] in VALUE_TYPES
         }
+    if value.get("failure_capture_state") in ("saved", "unavailable", "disabled"):
+        result["failure_capture_state"] = value["failure_capture_state"]
+    capture_id = value.get("failure_capture_id")
+    if isinstance(capture_id, str) and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", capture_id):
+        result["failure_capture_id"] = capture_id
+    expires = value.get("failure_capture_expires_at")
+    if type(expires) is int and 0 <= expires <= 100_000_000_000:
+        result["failure_capture_expires_at"] = expires
     return result
 
 
@@ -165,7 +174,8 @@ def job_event(row):
     stable = {name: value for name, value in diagnostic.items()
               if name not in {"response_bytes", "content_bytes", "choices_count", "usage_other_fields",
                               "reasoning_content_bytes", "reasoning_tokens", "elapsed_ms", "json_chars",
-                              "json_error_offset", "json_error_line", "json_error_column"}}
+                              "json_error_offset", "json_error_line", "json_error_column",
+                              "failure_capture_id", "failure_capture_expires_at"}}
     event["fingerprint"] = digest(json.dumps(["database", category, codes, stable], sort_keys=True))
     return event
 
