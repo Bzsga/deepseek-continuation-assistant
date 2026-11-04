@@ -36,6 +36,16 @@ SCHEMA_LAYOUTS = {"canonical", "array", "wrapped", "alias", "grouped", "unrecogn
 SCHEMA_FIELDS = {"entries", "items", "data", "result", "output", "archive", "BACKGROUND", "PEOPLE",
                  "DECISIONS", "RECENT", "QUOTES", "text", "content", "sourceIds", "source_ids",
                  "category", "kind", "error", "refusal"}
+NETWORK_STAGES = {"not_started", "tcp_connect", "tls", "send_headers", "send_body", "waiting_headers", "reading_body", "complete"}
+NETWORK_EXCEPTION_TYPES = {"none", "total_timeout", "cancelled", "connect_timeout", "read_timeout",
+                           "write_timeout", "pool_timeout", "connect_error", "read_error", "write_error",
+                           "protocol_error", "transport_error", "other"}
+NETWORK_EVENTS = {
+    prefix + "." + state
+    for prefix in ("connection.connect_tcp", "connection.start_tls", "http11.send_request_headers",
+                   "http11.send_request_body", "http11.receive_response_headers", "http11.receive_response_body")
+    for state in ("started", "complete", "failed")
+}
 USAGE_FIELDS = {
     "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens", "total_tokens",
     "prompt_tokens_details", "completion_tokens_details",
@@ -81,13 +91,14 @@ def safe_diagnostic(value):
     result = {}
     for name in ("http_status", "response_bytes", "choices_count", "content_bytes", "usage_other_fields",
                  "reasoning_content_bytes", "reasoning_tokens", "elapsed_ms", "json_chars",
-                 "json_error_offset", "json_error_line", "json_error_column"):
+                 "json_error_offset", "json_error_line", "json_error_column", "network_stage_elapsed_ms"):
         number = value.get(name)
         if type(number) is int and 0 <= number <= 1_000_000_000:
             result[name] = number
     for name in ("has_error", "has_refusal", "has_reasoning", "json_has_bom", "body_read_complete",
                  "json_invisible_prefix", "json_edge_format_removed", "json_has_object_candidate",
-                 "json_has_array_candidate", "json_scan_limited", "schema_normalized"):
+                 "json_has_array_candidate", "json_scan_limited", "schema_normalized",
+                 "request_sent", "response_headers_received"):
         if type(value.get(name)) is bool:
             result[name] = value[name]
     for name in ("root", "choices_type", "usage_type", "content_type", "reasoning_content_type"):
@@ -97,6 +108,15 @@ def safe_diagnostic(value):
         result["finish_reason"] = value["finish_reason"]
     if value.get("stage") in ("transport", "envelope_json", "response_validation"):
         result["stage"] = value["stage"]
+    for name, allowed in (("network_stage", NETWORK_STAGES), ("exception_type", NETWORK_EXCEPTION_TYPES)):
+        if isinstance(value.get(name), str) and value[name] in allowed:
+            result[name] = value[name]
+    network_events = value.get("network_events")
+    if isinstance(network_events, dict):
+        result["network_events"] = {
+            name: network_events[name] for name in sorted(NETWORK_EVENTS)
+            if type(network_events.get(name)) is int and 0 <= network_events[name] <= 1_000_000_000
+        }
     for name, allowed in (("json_error_type", JSON_ERROR_TYPES), ("json_wrapper", JSON_WRAPPERS),
                           ("json_first_char", JSON_FIRST_CHARACTERS), ("schema_layout", SCHEMA_LAYOUTS)):
         if isinstance(value.get(name), str) and value[name] in allowed:
@@ -175,7 +195,8 @@ def job_event(row):
               if name not in {"response_bytes", "content_bytes", "choices_count", "usage_other_fields",
                               "reasoning_content_bytes", "reasoning_tokens", "elapsed_ms", "json_chars",
                               "json_error_offset", "json_error_line", "json_error_column",
-                              "failure_capture_id", "failure_capture_expires_at"}}
+                              "failure_capture_id", "failure_capture_expires_at",
+                              "network_stage_elapsed_ms", "network_events"}}
     event["fingerprint"] = digest(json.dumps(["database", category, codes, stable], sort_keys=True))
     return event
 

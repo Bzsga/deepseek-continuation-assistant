@@ -15,7 +15,8 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.failure_artifacts import ArtifactError
 from app.main import create_app
-from app.provider import ProviderOutcome
+from app.provider import ProviderOutcome, snapshot_for
+from app.runner import Runner
 
 
 PRIVATE = "SYNTHETIC_FAILURE_BODY_DO_NOT_EXPOSE"
@@ -197,7 +198,93 @@ def test_runner_timeout_and_shutdown_keep_partial_response(settings, monkeypatch
     assert base64.b64decode(artifact["response"]["body_base64"]) == PARTIAL
     assert artifact["response"]["http_status"] == 200
     assert not artifact["response"]["body_read_complete"] and not artifact["complete_original"]
+    assert info["network_stage"] == "reading_body" and info["response_headers_received"] is True
+    assert info["exception_type"] == ("cancelled" if shutdown else "total_timeout")
+    assert info["elapsed_ms"] >= 0 and info["body_read_complete"] is False
+    assert artifact["technical"] == {key: info[key] for key in artifact["technical"]}
+    if not shutdown:
+        assert "[runner_timeout]" in row["message"]
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("partial_body", [False, True], ids=["waiting_headers", "reading_body"])
+def test_real_loopback_runner_timeout_preserves_network_stage_and_frozen_capture(settings, partial_body):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        release, finished = asyncio.Event(), asyncio.Event()
+        requests, connections, handlers = [], [], []
+
+        async def serve(reader, writer):
+            handlers.append(asyncio.current_task())
+            connections.append(True)
+            try:
+                headers = await reader.readuntil(b"\r\n\r\n")
+                content_length = next(int(line.split(b":", 1)[1]) for line in headers.split(b"\r\n")
+                                      if line.lower().startswith(b"content-length:"))
+                requests.append(json.loads(await reader.readexactly(content_length)))
+                if partial_body:
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 9999\r\n\r\n" + PARTIAL)
+                    await writer.drain()
+                await release.wait()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        execution_settings = replace(settings, provider_timeout_seconds=1)
+        messages = [{"id": "loopback-source", "role": "user", "content": "仅本机合成测试资料"}]
+        snapshot, _ = snapshot_for(execution_settings, messages)
+        snapshot["base_url"] = f"http://127.0.0.1:{port}/v1"
+        row = {"id": str(uuid.uuid4()), "provider": json.dumps(snapshot), "payload": json.dumps(messages),
+               "execution_settings": execution_settings}
+
+        class Store:
+            pending = row
+            outcome = None
+
+            def claim_next(self):
+                pending, self.pending = self.pending, None
+                return pending
+
+            def finish(self, job_id, outcome):
+                assert job_id == row["id"] and self.outcome is None
+                self.outcome = outcome
+                loop.call_soon_threadsafe(finished.set)
+
+        store = Store()
+        runner = Runner(execution_settings, store)
+        runner._purge_artifacts()
+        runner.tasks = [asyncio.create_task(runner.run())]
+        try:
+            await asyncio.wait_for(finished.wait(), timeout=5)
+            result = store.outcome
+            assert result.status == "uncertain" and "[runner_timeout]" in result.message
+            info = json.loads(result.message.split(" diagnostic=", 1)[1])
+            assert info["stage"] == "transport" and info["exception_type"] == "total_timeout"
+            assert info["network_stage"] == ("reading_body" if partial_body else "waiting_headers")
+            assert info["request_sent"] is True and info["response_headers_received"] is partial_body
+            assert info["http_status"] == (200 if partial_body else None)
+            assert info["body_read_complete"] is False
+            assert info["response_bytes"] == (len(PARTIAL) if partial_body else 0)
+            assert 900 <= info["elapsed_ms"] <= 4000
+            assert 0 <= info["network_stage_elapsed_ms"] <= info["elapsed_ms"]
+            assert "http11.send_request_body.complete" in info["network_events"]
+            assert "http11.receive_response_headers.started" in info["network_events"]
+            assert len(requests) == len(connections) == 1
+            artifact = runner.artifacts.load(info["failure_capture_id"])
+            assert artifact["technical"] == {key: info[key] for key in artifact["technical"]}
+            assert artifact["request"] == requests[0]
+            assert base64.b64decode(artifact["response"]["body_base64"]) == (PARTIAL if partial_body else b"")
+            assert not artifact["complete_original"]
+        finally:
+            await runner.stop()
+            release.set()
+            server.close()
+            await server.wait_closed()
+            await asyncio.gather(*handlers)
+
+    asyncio.run(scenario())
 
 
 def test_preflight_failure_records_missing_response_without_fabricating_wire(settings, monkeypatch):

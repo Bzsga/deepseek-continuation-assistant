@@ -33,6 +33,7 @@ FORBIDDEN_KEYS = {"headers", "authorization", "url", "baseurl", "settings", "api
                   "password", "secret", "accesstoken", "cookie", "cookies"}
 JSON_STRING_BYTES = re.compile(rb'"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*"')
 ERROR_MESSAGES = {
+    "runner_timeout": "Provider request reached the overall execution time limit.",
     "json": "Provider content was not valid JSON.",
     "schema": "Provider content failed the required schema.",
     "unknown_source": "Provider content referenced an unknown source.",
@@ -46,6 +47,21 @@ ERROR_MESSAGES = {
     "timeout": "Provider request did not complete within its time limit.",
     "transport": "Provider transport did not complete.",
     "provider_failed": "Provider execution did not produce a confirmed result.",
+}
+
+NETWORK_EVENT_STAGES = {
+    "connection.connect_tcp": "tcp_connect",  # Includes DNS in the AnyIO backend.
+    "connection.start_tls": "tls",
+    "http11.send_request_headers": "send_headers",
+    "http11.send_request_body": "send_body",
+    "http11.receive_response_headers": "waiting_headers",
+    "http11.receive_response_body": "reading_body",
+}
+NETWORK_EVENTS = {f"{event}.{state}" for event in NETWORK_EVENT_STAGES for state in ("started", "complete", "failed")}
+NETWORK_STAGES = {"not_started", "tcp_connect", "tls", "send_headers", "send_body", "waiting_headers", "reading_body", "complete"}
+TRACE_EXCEPTION_TYPES = {
+    "none", "total_timeout", "cancelled", "connect_timeout", "read_timeout", "write_timeout", "pool_timeout",
+    "connect_error", "read_error", "write_error", "protocol_error", "transport_error", "other",
 }
 
 
@@ -64,6 +80,77 @@ class ProviderTrace:
     http_status: int | None = None
     body_read_complete: bool = False
     response_truncated: bool = False
+    stage: str = "transport"
+    network_stage: str = "not_started"
+    request_sent: bool = False
+    response_headers_received: bool = False
+    exception_type: str = "none"
+    prompt_version: int | None = None
+    network_events: dict = field(default_factory=dict, repr=False)
+    _started_at: float = field(default_factory=time.monotonic, repr=False)
+    _network_started_at: float | None = field(default=None, repr=False)
+    _ended_at: float | None = field(default=None, repr=False)
+
+    def begin(self):
+        self.request = None
+        self.response_body.clear()
+        self.http_status = None
+        self.body_read_complete = self.response_truncated = False
+        self.stage, self.network_stage, self.exception_type = "transport", "not_started", "none"
+        self.request_sent = self.response_headers_received = False
+        self.prompt_version = None
+        self.network_events.clear()
+        self._started_at = time.monotonic()
+        self._network_started_at = self._started_at
+        self._ended_at = None
+
+    @staticmethod
+    def _milliseconds(value):
+        return min(1_000_000_000, max(0, int(value * 1000)))
+
+    def set_network_stage(self, stage):
+        if stage in NETWORK_STAGES and stage != self.network_stage:
+            self.network_stage = stage
+            self._network_started_at = time.monotonic()
+
+    def network_event(self, name):
+        # The HTTPX callback passes only the name here. Never retain its info:
+        # that dictionary contains request headers, hosts and exception objects.
+        if name not in NETWORK_EVENTS:
+            return
+        self.network_events[name] = self._milliseconds(time.monotonic() - self._started_at)
+        event, state = name.rsplit(".", 1)
+        if state == "started":
+            self.set_network_stage(NETWORK_EVENT_STAGES[event])
+        elif name == "http11.send_request_body.complete":
+            self.request_sent = True
+        elif name == "http11.receive_response_headers.complete":
+            self.response_headers_received = True
+        elif name == "http11.receive_response_body.complete":
+            self.set_network_stage("complete")
+
+    def finish(self, exception_type=None):
+        if exception_type in TRACE_EXCEPTION_TYPES:
+            self.exception_type = exception_type
+        if self._ended_at is None:
+            self._ended_at = time.monotonic()
+
+    def diagnostics(self):
+        now = self._ended_at if self._ended_at is not None else time.monotonic()
+        result = {
+            "stage": self.stage if self.stage in {"transport", "envelope_json", "response_validation"} else "transport",
+            "network_stage": self.network_stage if self.network_stage in NETWORK_STAGES else "not_started",
+            "elapsed_ms": self._milliseconds(now - self._started_at),
+            "network_stage_elapsed_ms": self._milliseconds(now - (self._network_started_at or self._started_at)),
+            "request_sent": self.request_sent is True,
+            "response_headers_received": self.response_headers_received is True,
+            "exception_type": self.exception_type if self.exception_type in TRACE_EXCEPTION_TYPES else "other",
+            "network_events": {name: elapsed for name, elapsed in self.network_events.items()
+                               if name in NETWORK_EVENTS and type(elapsed) is int and 0 <= elapsed <= 1_000_000_000},
+        }
+        if type(self.prompt_version) is int and self.prompt_version in {2, 3, 4}:
+            result["prompt_version"] = self.prompt_version
+        return result
 
 
 def _encoded(value):
@@ -272,7 +359,7 @@ class ArtifactStore:
                     "version": 1, "id": artifact_id, "job_id": job_id,
                     "created_at": now, "expires_at": expires_at, "status": status,
                     "error_code": code, "error_message": fixed_message,
-                    "request": trace.request, "snapshot": safe_snapshot,
+                    "request": trace.request, "snapshot": safe_snapshot, "technical": trace.diagnostics(),
                     "messages": messages, "source_id_map": source_map,
                 })
                 redacted = redactor.changed or response_redacted

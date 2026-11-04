@@ -46,8 +46,10 @@ import kotlinx.serialization.json.decodeFromStream
 import kotlinx.serialization.json.encodeToStream
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
-class AppController(application: Application) : AndroidViewModel(application) {
-    private val database = Room.databaseBuilder(application, AppDatabase::class.java, "continuation.db")
+class AppController internal constructor(application: Application, databaseName: String) : AndroidViewModel(application) {
+    constructor(application: Application) : this(application, "continuation.db")
+
+    private val database = Room.databaseBuilder(application, AppDatabase::class.java, databaseName)
         .addMigrations(AppDatabase.MIGRATION_1_2).build()
     private val dao = database.records()
     private val credentials = SecureCredentials(application)
@@ -70,6 +72,7 @@ class AppController(application: Application) : AndroidViewModel(application) {
     private var backgroundQuotaRefresh: Job? = null
     private val ready = CompletableDeferred<Unit>()
     private val jobs = ConcurrentHashMap<String, Job>()
+    internal var organizationNetwork: OrganizationNetwork = LiveOrganizationNetwork
     private val activeOperations = AtomicInteger()
     private var clearingData = false
     // Guarded by mutex. A cancelled Room return can follow a successful commit;
@@ -287,7 +290,7 @@ class AppController(application: Application) : AndroidViewModel(application) {
         require(!requireFreeMode || snapshot.mode == "companion") { "当前使用自己的 AI 服务。" }
         val identityKey = companionIdentityKey(snapshot.companionUrl)
         val existing = snapshot.trialToken.ifBlank { credentials.get(identityKey) }
-        val token = if (existing.isNotBlank()) existing else SummaryNetwork.createSession(snapshot).token
+        val token = if (existing.isNotBlank()) existing else organizationNetwork.createSession(snapshot).token
         require(token.isNotBlank()) { "免费服务未返回有效身份，请稍后再试。" }
         mutex.withLock {
             val current = state.value.settings
@@ -308,7 +311,7 @@ class AppController(application: Application) : AndroidViewModel(application) {
         var snapshot = state.value.settings
         try {
             snapshot = ensureCompanionIdentity()
-            val quota = SummaryNetwork.getQuota(snapshot)
+            val quota = organizationNetwork.quota(snapshot)
             require(sameCompanionIdentity(state.value.settings, snapshot)) { "服务设置已改变，请重新检查后开始。" }
             mutableState.update { it.copy(quota = quota, quotaLoading = false, quotaError = null) }
             quota
@@ -861,7 +864,7 @@ class AppController(application: Application) : AndroidViewModel(application) {
         mutex.withLock {
             val task = loadTask(taskId)
             if (task.status in setOf("completed", "cancelled", "paused")) return@withLock
-            saveTask(task.copy(status = "paused", inFlight = false, uncertain = task.uncertain || (task.inFlight && task.currentRemoteId().isBlank()),
+            saveTask(task.withoutInFlight().copy(status = "paused", uncertain = task.uncertain || task.hasUncertainRequest(),
                 message = if (task.inFlight && task.settings.mode == "companion") "已暂停。当前请求可能已占用免费次数，已完成进度保留。"
                 else if (task.inFlight) "已暂停。当前请求可能已计费，恢复时会保留已完成进度。" else "已暂停，已完成进度保留。"))
             refresh()
@@ -874,8 +877,8 @@ class AppController(application: Application) : AndroidViewModel(application) {
         val task = mutex.withLock {
             val current = dao.task(taskId)?.decodeTask() ?: return@withLock null
             if (current.status == "completed") return@withLock null
-            val updated = current.copy(status = "cancelled", cancelRequested = true, inFlight = false,
-                uncertain = current.uncertain || (current.inFlight && current.currentRemoteId().isEmpty()),
+            val updated = current.withoutInFlight().copy(status = "cancelled", cancelRequested = true,
+                uncertain = current.uncertain || current.hasUncertainRequest(),
                 message = if (current.inFlight && current.settings.mode == "companion") "已停止后续整理。在途请求可能已占用免费次数，已完成分块仍保留。"
                 else if (current.inFlight) "已停止后续整理。在途请求可能已计费，已完成分块仍保留。" else "已取消，已完成分块仍保留。")
             saveTask(updated)
@@ -884,20 +887,29 @@ class AppController(application: Application) : AndroidViewModel(application) {
         } ?: return@operation
         jobs[taskId]?.cancelAndJoin()
         val latest = mutex.withLock { dao.task(taskId)?.decodeTask() } ?: task
-        if (latest.settings.mode == "companion" && latest.currentRemoteId().isNotBlank()) {
-            try {
-                val remote = SummaryNetwork.cancel(withTaskSecret(latest), latest.currentRemoteId())
-                mutex.withLock {
-                    val current = dao.task(taskId)?.decodeTask()
-                    if (current != null) {
-                        val remoteId = latest.currentRemoteId()
-                        saveTask(current.copy(chunks = current.chunks.map { if (it.remoteJobId == remoteId) it.copy(remoteStatus = remote.status) else it }))
-                        refresh()
+        if (latest.settings.mode == "companion") {
+            var unconfirmed = 0
+            for (chunk in latest.chunks.filter { !it.completed && it.remoteJobId.isNotBlank() }.distinctBy { it.remoteJobId }) {
+                try {
+                    val remote = organizationNetwork.cancel(withTaskSecret(latest), chunk.remoteJobId)
+                    withContext(NonCancellable) {
+                        mutex.withLock {
+                            dao.task(taskId)?.decodeTask()?.let { current ->
+                                saveTask(current.updateChunk(chunk.id) { it.copy(remoteStatus = remote.status, inFlight = false) })
+                                refresh()
+                            }
+                        }
+                        if (remote.status == "completed") {
+                            persistChunk(taskId, chunk, SummaryProtocol.validateEntries(remote.entries, chunk.messages))
+                        }
                     }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    unconfirmed++
                 }
-            } catch (error: Exception) {
-                notice("本地任务已停止，远端取消暂未确认。${error.message.orEmpty()}")
             }
+            if (unconfirmed > 0) notice("本地任务已停止，${unconfirmed}个远端请求的取消暂未确认；已保留任务编号。")
         }
         scheduleQuotaRefresh(latest)
     }
@@ -1077,39 +1089,19 @@ class AppController(application: Application) : AndroidViewModel(application) {
                 saveTask(task.copy(status = "running", message = "正在整理，成功分块将即时保存"))
                 refresh()
             }
-            while (true) {
-                kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                val task = mutex.withLock { loadTask(taskId) }
-                if (task.cancelRequested || task.status != "running") return
-                val chunk = task.chunks.firstOrNull { !it.completed } ?: break
-                val cached = dao.cache(chunk.cacheKey)
-                if (cached != null) {
-                    val entries = appJson.decodeFromString<List<ArchiveEntry>>(cached.payload)
-                    persistChunk(taskId, chunk, SummaryProtocol.validateEntries(entries, chunk.messages))
-                    continue
-                }
-                val settings = withTaskSecret(task)
-                SummaryProtocol.validateForRequest(settings, chunk.messages)
-                val entries = if (settings.mode == "byok") {
-                    mutex.withLock {
-                        val current = loadTask(taskId)
-                        if (current.cancelRequested || current.status != "running") return
-                        saveTask(current.copy(inFlight = true))
-                    }
-                    SummaryNetwork.summarize(settings, chunk.messages)
-                } else runCompanionChunk(task, chunk, settings)
-                val validated = SummaryProtocol.validateEntries(entries, chunk.messages)
-                withContext(NonCancellable) { persistChunk(taskId, chunk, validated) }
-                scheduleQuotaRefresh(task)
+            val started = mutex.withLock { loadTask(taskId) }
+            val failures = dispatchTaskChunks(started.chunks, organizationConcurrency(started.settings)) { chunk, maySubmit ->
+                runTaskChunk(taskId, chunk, maySubmit)
             }
+            if (failures.isNotEmpty()) throw TaskDispatchException(failures)
             mutex.withLock {
                 val task = loadTask(taskId)
-                if (!task.cancelRequested) {
+                if (!task.cancelRequested && task.status == "running" && task.chunks.all { it.completed }) {
                     val archive = loadArchive(task.archiveId)
                     val hasContent = archive.background.isNotBlank() || archive.entries.any { !it.deleted && it.text.isNotBlank() }
                     val message = if (hasContent) "整理完成，人工修改和置顶内容已保留"
                     else "没有提取到可续聊的内容，可改用原文模式。"
-                    saveTask(task.copy(status = "completed", inFlight = false, uncertain = false, message = message))
+                    saveTask(task.withoutInFlight().copy(status = "completed", uncertain = false, message = message))
                 }
                 refresh()
                 scheduleQuotaRefresh(task)
@@ -1118,9 +1110,12 @@ class AppController(application: Application) : AndroidViewModel(application) {
             withContext(NonCancellable) {
                 mutex.withLock {
                     val task = dao.task(taskId)?.decodeTask()
-                    if (task != null && !task.cancelRequested && task.status != "completed") {
-                        saveTask(task.copy(status = "paused", inFlight = false, uncertain = task.uncertain || (task.inFlight && task.currentRemoteId().isBlank()),
-                            message = "整理已中断，进度已保存。请检查原请求后继续。"))
+                    if (task != null && task.status != "completed") {
+                        saveTask(task.withoutInFlight().copy(
+                            status = if (task.cancelRequested) "cancelled" else "paused",
+                            uncertain = task.uncertain || task.hasUncertainRequest(),
+                            message = if (task.status in setOf("paused", "cancelled")) task.message
+                                else "整理已中断，进度已保存。请检查原请求后继续。"))
                         refresh()
                     }
                 }
@@ -1129,19 +1124,19 @@ class AppController(application: Application) : AndroidViewModel(application) {
         } catch (error: Exception) {
             mutex.withLock {
                 val task = dao.task(taskId)?.decodeTask() ?: return
+                val failures = (error as? TaskDispatchException)?.failures.orEmpty()
+                val primary = failures.firstOrNull()?.error ?: error
                 DiagnosticLog.record("task", "failed", buildMap {
                     put("chunk_count", task.chunks.size.toLong())
                     put("chunk_index", task.chunks.count { it.completed }.toLong())
-                    if (error is SummaryFailure) error.statusCode?.let { put("http_status", it.toLong()) }
-                }, error)
+                    if (primary is SummaryFailure) primary.statusCode?.let { put("http_status", it.toLong()) }
+                }, primary)
                 viewModelScope.launch { prepareDiagnosticsIdentity() }
                 if (!task.cancelRequested) {
-                    val expired = error is SummaryFailure && error.expired
-                    val ambiguous = if (error is SummaryFailure) error.ambiguous else task.inFlight
-                    val currentChunkId = task.chunks.firstOrNull { !it.completed }?.id
-                    val chunks = if (expired) task.chunks.map { if (it.id == currentChunkId) it.copy(remoteStatus = "expired") else it } else task.chunks
-                    saveTask(task.copy(chunks = chunks, status = "paused", inFlight = false, uncertain = task.uncertain || ambiguous || expired,
-                        message = error.message?.take(1500) ?: "整理暂停，请检查网络和服务设置"))
+                    saveTask(if (failures.isNotEmpty()) task.afterDispatchFailures(failures)
+                        else task.withoutInFlight().copy(status = "paused", uncertain = task.uncertain ||
+                            (if (primary is SummaryFailure) primary.ambiguous || primary.expired else task.hasUncertainRequest()),
+                            message = primary.message?.take(1500) ?: "整理暂停，请检查网络和服务设置"))
                 }
                 refresh()
                 scheduleQuotaRefresh(task)
@@ -1149,35 +1144,88 @@ class AppController(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun runCompanionChunk(task: TaskRecord, chunk: TaskChunk, settings: ServiceSettings): List<ArchiveEntry> {
+    private suspend fun runTaskChunk(taskId: String, candidate: TaskChunk, maySubmit: ChunkAdmission) {
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        val task = mutex.withLock { loadTask(taskId) }
+        if (task.cancelRequested || task.status != "running") throw CancellationException()
+        val chunk = task.chunks.first { it.id == candidate.id }
+        if (chunk.completed) return
+        val cached = dao.cache(chunk.cacheKey)
+        if (cached != null) {
+            val entries = SummaryProtocol.validateEntries(appJson.decodeFromString<List<ArchiveEntry>>(cached.payload), chunk.messages)
+            withContext(NonCancellable) { persistChunk(taskId, chunk, entries) }
+            return
+        }
+        val settings = withTaskSecret(task)
+        SummaryProtocol.validateForRequest(settings, chunk.messages)
+        val entries = if (settings.mode == "byok") {
+            if (!recordChunkStart(taskId, chunk, maySubmit)) return
+            organizationNetwork.summarize(settings, chunk.messages)
+        } else runCompanionChunk(task, chunk, settings, maySubmit) ?: return
+        val validated = SummaryProtocol.validateEntries(entries, chunk.messages)
+        withContext(NonCancellable) { persistChunk(taskId, chunk, validated) }
+        scheduleQuotaRefresh(task)
+    }
+
+    private suspend fun recordChunkStart(taskId: String, chunk: TaskChunk, admission: ChunkAdmission): Boolean =
+        admission.recordStart(persistStarted = {
+            mutex.withLock {
+                val current = loadTask(taskId)
+                if (current.cancelRequested || current.status != "running") throw CancellationException()
+                saveTask(current.updateChunk(chunk.id) { it.copy(requestStarted = true, inFlight = true) })
+            }
+        }, abandonUnsent = {
+            mutex.withLock {
+                val current = loadTask(taskId)
+                saveTask(current.updateChunk(chunk.id) { it.copy(requestStarted = chunk.requestStarted, inFlight = false) })
+            }
+        })
+
+    private suspend fun runCompanionChunk(
+        task: TaskRecord, chunk: TaskChunk, settings: ServiceSettings, maySubmit: ChunkAdmission,
+    ): List<ArchiveEntry>? {
         var remoteId = chunk.remoteJobId
         var remote = if (remoteId.isEmpty()) {
-            val quota = SummaryNetwork.getQuota(settings)
-            quota.organizationBlocker()?.let { throw SummaryFailure(it, ambiguous = false) }
-            val currentBudget = settingsWithServerBudget(settings, quota)
-            if (currentBudget.model != settings.model || currentBudget.contextTokens != settings.contextTokens ||
-                currentBudget.maxOutputTokens != settings.maxOutputTokens) {
-                throw SummaryFailure("免费服务配置已更新，已保留完成进度。请取消旧任务后按新配置重新整理。", ambiguous = false)
+            if (!maySubmit()) return null
+            // A lost POST is recovered by the original idempotency identity even
+            // when it consumed the last quota or the service budget has changed.
+            if (!chunk.requestStarted) {
+                val quota = organizationNetwork.quota(settings)
+                quota.organizationBlocker()?.let { throw SummaryFailure(it, ambiguous = false) }
+                val currentBudget = settingsWithServerBudget(settings, quota)
+                if (currentBudget.model != settings.model || currentBudget.contextTokens != settings.contextTokens ||
+                    currentBudget.maxOutputTokens != settings.maxOutputTokens) {
+                    throw SummaryFailure("免费服务配置已更新，已保留完成进度。请取消旧任务后按新配置重新整理。", ambiguous = false)
+                }
             }
-            mutex.withLock {
-                val current = loadTask(task.id)
-                if (current.cancelRequested || current.status != "running") throw CancellationException()
-                saveTask(current.copy(inFlight = true))
-            }
-            val submitted = SummaryNetwork.submit(settings, chunk.messages, "${task.id}:${chunk.id}:${chunk.attempt}")
+            if (!recordChunkStart(task.id, chunk, maySubmit)) return null
+            val submitted = organizationNetwork.submit(settings, chunk.messages, "${task.id}:${chunk.id}:${chunk.attempt}")
+            if (submitted.status !in setOf("queued", "running", "completed")) maySubmit.stop()
             remoteId = submitted.id
             withContext(NonCancellable) {
                 mutex.withLock {
                     val current = loadTask(task.id)
-                    saveTask(current.copy(chunks = current.chunks.map { if (it.id == chunk.id) it.copy(remoteJobId = remoteId) else it }))
+                    saveTask(current.updateChunk(chunk.id) { it.copy(remoteJobId = remoteId, remoteStatus = submitted.status) })
                 }
             }
             submitted
-        } else SummaryNetwork.poll(settings, remoteId)
-        repeat(1200) {
-            if (remote.status !in setOf("queued", "running")) mutex.withLock {
+        } else {
+            mutex.withLock {
                 val current = loadTask(task.id)
-                saveTask(current.copy(chunks = current.chunks.map { if (it.id == chunk.id) it.copy(remoteStatus = remote.status) else it }))
+                if (current.cancelRequested || current.status != "running") throw CancellationException()
+                saveTask(current.updateChunk(chunk.id) { it.copy(requestStarted = true, inFlight = true) })
+            }
+            organizationNetwork.poll(settings, remoteId)
+        }
+        repeat(1200) {
+            // Stop admissions before the durable terminal-state write can yield
+            // to a sibling that just finished and is looking for its next chunk.
+            if (remote.status !in setOf("queued", "running", "completed")) maySubmit.stop()
+            if (remote.status !in setOf("queued", "running")) withContext(NonCancellable) {
+                mutex.withLock {
+                    val current = loadTask(task.id)
+                    saveTask(current.updateChunk(chunk.id) { it.copy(remoteStatus = remote.status) })
+                }
             }
             when (remote.status) {
                 "completed" -> return SummaryProtocol.validateEntries(remote.entries, chunk.messages)
@@ -1187,7 +1235,7 @@ class AppController(application: Application) : AndroidViewModel(application) {
                 else -> throw SummaryFailure("服务返回未知任务状态，已暂停", true)
             }
             delay(1500)
-            remote = SummaryNetwork.poll(settings, remoteId)
+            remote = organizationNetwork.poll(settings, remoteId)
         }
         throw SummaryFailure("远端任务仍在处理，已保存任务编号，可稍后继续查询", false)
     }
@@ -1201,18 +1249,19 @@ class AppController(application: Application) : AndroidViewModel(application) {
                 if (task.chunks.first { it.id == chunk.id }.completed) return@withTransaction
                 val archive = loadArchive(task.archiveId)
                 require(taskSourcesFit(task, sourceIds(archive))) { "档案来源已变化，分块结果已保存，请新建整理任务" }
-                val previousParts = task.chunks.filter { it.completed }.map { completed ->
+                val parts = task.chunks.filter { it.completed || it.id == chunk.id }.associate { completed ->
                     val cached = dao.cache(completed.cacheKey) ?: error("已完成分块缓存缺失，请恢复完整备份")
-                    SummaryProtocol.validateEntries(appJson.decodeFromString<List<ArchiveEntry>>(cached.payload), completed.messages)
+                    completed.id to SummaryProtocol.validateEntries(appJson.decodeFromString<List<ArchiveEntry>>(cached.payload), completed.messages)
                 }
-                val previousProgress = aggregateChunkEntries(previousParts)
-                val currentProgress = aggregateChunkEntries(previousParts + listOf(entries))
+                val previousProgress = aggregateChunkEntries(task.chunks.filter { it.completed }.map { parts.getValue(it.id) })
+                val currentProgress = aggregateChunkEntries(task.chunks.filter { it.completed || it.id == chunk.id }.map { parts.getValue(it.id) })
                 val merged = mergeTaskProgress(archive.entries, previousProgress, currentProgress)
                 saveArchive(archive.copy(entries = merged.entries,
                     generationMode = if (archive.generationMode == "original" && entries.isNotEmpty()) "legacy" else archive.generationMode))
                 saveConflicts(archive.id, merged.conflicts)
-                saveTask(task.copy(chunks = task.chunks.map { if (it.id == chunk.id) it.copy(completed = true) else it },
-                    inFlight = false, uncertain = false, message = "已保存 ${task.chunks.count { it.completed } + 1}/${task.chunks.size} 个分块"))
+                val updated = task.updateChunk(chunk.id) { it.copy(completed = true, inFlight = false) }
+                saveTask(updated.copy(message = if (task.status == "running")
+                    "已保存 ${updated.chunks.count { it.completed }}/${task.chunks.size} 个分块" else task.message))
             }
             refresh()
         }
@@ -1310,7 +1359,22 @@ class AppController(application: Application) : AndroidViewModel(application) {
     }
 }
 
-internal fun TaskRow.decodeTask(): TaskRecord = appJson.decodeFromString(payload)
+internal fun TaskRow.decodeTask(): TaskRecord {
+    val task = appJson.decodeFromString<TaskRecord>(payload)
+    if ((task.inFlight || task.uncertain) && task.chunks.none { it.requestStarted || it.inFlight }) {
+        // Old serial versions cleared aggregate inFlight after a lost POST.
+        // Migrate only rows that actually predate the per-chunk field: the
+        // uncertainty flag on a new, explicitly prepared retry is not evidence
+        // that it was already submitted.
+        val document = appJson.parseToJsonElement(payload) as kotlinx.serialization.json.JsonObject
+        val chunks = document["chunks"] as kotlinx.serialization.json.JsonArray
+        if (chunks.none { "requestStarted" in (it as kotlinx.serialization.json.JsonObject) }) {
+            val activeId = task.chunks.firstOrNull { !it.completed }?.id
+            return task.copy(chunks = task.chunks.map { if (it.id == activeId) it.copy(requestStarted = true) else it })
+        }
+    }
+    return task
+}
 internal fun hash(value: String): String = hash(value.toByteArray(Charsets.UTF_8))
 internal fun hash(value: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(value).joinToString("") { "%02x".format(it) }
 

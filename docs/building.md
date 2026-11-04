@@ -1,6 +1,6 @@
 # 构建与安装
 
-源码版本见 `android/app/build.gradle.kts`。当前 Android 为 1.0.2 / versionCode 11，最低 Android 8.0（API 26），compile/target SDK 为 35。
+源码版本见 `android/app/build.gradle.kts`。当前 Android 为 1.0.3 / versionCode 12，最低 Android 8.0（API 26），compile/target SDK 为 35。
 
 ## Android 环境
 
@@ -74,4 +74,4 @@ python -m venv .venv
 python -m unittest discover -s tools/tests -p test_publish_release.py
 ```
 
-既有构建与测试结论见 [README](../README.md#验证状态与局限)。1.0.2 因教程隐私清理重新打包；它的实际构建、验签和发布状态见对应 Release，不能从 1.0.1 的测试记录直接推导新包已通过。
+既有构建与测试结论见 [README](../README.md#验证状态与局限)。当前版本的构建、验签及并发保存/恢复验证见对应 Release；历史测试不代表本轮重新执行所有平台与场景。

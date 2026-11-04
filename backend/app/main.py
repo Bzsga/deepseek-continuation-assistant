@@ -135,8 +135,10 @@ def create_app(settings=None):
 
     @app.get("/health")
     def health():
-        worker_ok = not settings.worker_enabled or (runner.task is not None and not runner.task.done())
-        healthy = worker_ok and runner.cleanup_ok
+        worker_ok = not settings.worker_enabled or (
+            len(runner.tasks) == settings.worker_concurrency and all(not task.done() for task in runner.tasks)
+        )
+        healthy = worker_ok and runner.cleanup_ok and runner.cleanup_task is not None and not runner.cleanup_task.done()
         return JSONResponse({"status": "ok" if healthy else "degraded",
                              "service": "deepseek-continuation-assistant", "mock_mode": settings.mock_mode},
                             status_code=200 if healthy else 503)
@@ -158,7 +160,7 @@ def create_app(settings=None):
     @app.post("/v1/jobs")
     async def submit(body: JobRequest, owner_id=Depends(owner)):
         result = await asyncio.to_thread(store.create_job, owner_id, body)
-        runner.wake.set()
+        runner.notify()
         return result
 
     @app.get("/v1/jobs/{job_id}")

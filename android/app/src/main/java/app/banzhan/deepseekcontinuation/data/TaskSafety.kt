@@ -57,6 +57,31 @@ internal fun requireTaskSlot(archiveId: String, taskId: String?, tasks: List<Tas
 internal fun taskSourcesFit(task: TaskRecord, allowedIds: Set<String>): Boolean =
     task.chunks.all { chunk -> chunk.messages.all { it.id in allowedIds } }
 
+internal fun TaskRecord.afterDispatchFailures(failures: List<ChunkDispatchFailure>): TaskRecord {
+    var updated = withoutInFlight()
+    var needsAcknowledgment = uncertain
+    for (failure in failures) {
+        val cause = failure.error
+        val chunk = chunks.first { it.id == failure.chunk.id }
+        val expired = cause is SummaryFailure && cause.expired
+        needsAcknowledgment = needsAcknowledgment || expired ||
+            (if (cause is SummaryFailure) cause.ambiguous else chunk.requestStarted || chunk.inFlight)
+        updated = updated.updateChunk(chunk.id) {
+            when {
+                expired -> it.copy(remoteStatus = "expired")
+                // Refusal of an idempotent recovery says nothing about whether
+                // its older POST was admitted. Only a newly attempted request
+                // can safely lose its started marker after a definite refusal.
+                cause is SummaryFailure && !cause.ambiguous && it.remoteJobId.isBlank() &&
+                    !failure.chunk.requestStarted -> it.copy(requestStarted = false)
+                else -> it
+            }
+        }
+    }
+    return updated.copy(status = "paused", uncertain = needsAcknowledgment || updated.hasUncertainRequest(),
+        message = failures.first().error.message?.take(1500) ?: "整理暂停，请检查网络和服务设置")
+}
+
 /** Accumulate every successful piece without putting chunk boundaries into entry identity. */
 internal fun aggregateChunkEntries(parts: List<List<ArchiveEntry>>): List<ArchiveEntry> =
     parts.flatten().groupBy { it.id }.values.map { group ->

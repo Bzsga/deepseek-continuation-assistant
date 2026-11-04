@@ -11,6 +11,7 @@ import httpx
 from pydantic import ValidationError
 
 from .config import Settings
+from .failure_artifacts import ProviderTrace
 from .schemas import GeneratedDocument
 
 
@@ -637,23 +638,44 @@ def normalize_entries(content: str, messages, *, warnings=None, diagnostic=None)
 
 
 async def organize(settings: Settings, snapshot, messages, *, trace=None):
-    if trace is not None:
-        trace.request = None
-        trace.response_body.clear()
-        trace.http_status = None
-        trace.body_read_complete = False
-        trace.response_truncated = False
+    trace = trace if trace is not None else ProviderTrace()
+    trace.begin()
+    try:
+        return await _organize(settings, snapshot, messages, trace)
+    except asyncio.CancelledError:
+        trace.finish("cancelled")
+        raise
+    finally:
+        trace.finish()
+
+
+def transport_exception_type(error):
+    for exception, label in (
+        (httpx.ConnectTimeout, "connect_timeout"), (httpx.ReadTimeout, "read_timeout"),
+        (httpx.WriteTimeout, "write_timeout"), (httpx.PoolTimeout, "pool_timeout"),
+        (httpx.ConnectError, "connect_error"), (httpx.ReadError, "read_error"),
+        (httpx.WriteError, "write_error"), (httpx.ProtocolError, "protocol_error"),
+        (httpx.HTTPError, "transport_error"),
+    ):
+        if isinstance(error, exception):
+            return label
+    return "other"
+
+
+async def _organize(settings: Settings, snapshot, messages, trace):
     prompt_version = None
     try:
         snapshot_version = snapshot.get("protocol_version", 2)
         prompt = provider_messages(messages, snapshot["output_bound"],
                                    protocol_version=snapshot_version)
         prompt_version = snapshot_version
+        trace.prompt_version = snapshot_version
         actual_bound = sum(len(item["content"].encode("utf-8")) for item in prompt) + 1024
         if actual_bound > snapshot["input_bound"]:
             raise ProtocolError("content_shape")
     except (ProtocolError, UnicodeError):
         diagnostic = response_diagnostics()
+        diagnostic.update(trace.diagnostics())
         if prompt_version is not None:
             diagnostic["prompt_version"] = prompt_version
         return ProviderOutcome("failed", diagnostic_message(
@@ -677,6 +699,7 @@ async def organize(settings: Settings, snapshot, messages, *, trace=None):
 
     async def read_body(response, *, raw=False):
         nonlocal body_read_complete
+        trace.set_network_stage("reading_body")
         stream = response.aiter_raw() if raw else response.aiter_bytes()
         async for chunk in stream:
             observed_size = len(data) + len(chunk)
@@ -689,6 +712,7 @@ async def organize(settings: Settings, snapshot, messages, *, trace=None):
         body_read_complete = True
         if trace is not None:
             trace.body_read_complete = True
+        trace.set_network_stage("complete")
         return None
 
     async def read_error_body(response, *, raw=False):
@@ -705,11 +729,15 @@ async def organize(settings: Settings, snapshot, messages, *, trace=None):
 
     def diagnostics(response_bytes=None):
         result = response_diagnostics(envelope, http_status, len(data) if response_bytes is None else response_bytes)
-        result["elapsed_ms"] = min(1_000_000_000, max(0, int((time.monotonic() - started) * 1000)))
-        result["stage"] = stage
+        trace.stage = stage
+        result.update(trace.diagnostics())
         result["body_read_complete"] = body_read_complete
         result["prompt_version"] = prompt_version
         return result
+
+    async def network_trace(name, _info):
+        # Ignore all info values, including headers, hostnames and exceptions.
+        trace.network_event(name)
 
     try:
         request_body = {
@@ -735,11 +763,12 @@ async def organize(settings: Settings, snapshot, messages, *, trace=None):
             async with client.stream(
                 "POST", snapshot["base_url"].rstrip("/") + "/chat/completions",
                 headers={"Authorization": f"Bearer {settings.api_key}", "Accept-Encoding": "identity"},
-                json=request_body,
+                json=request_body, extensions={"trace": network_trace},
             ) as response:
                 http_status = response.status_code
                 if trace is not None:
                     trace.http_status = http_status
+                trace.response_headers_received = True
                 if response.status_code != 200:
                     await read_error_body(response, raw=response.headers.get("content-encoding", "identity") != "identity")
                     label = {502: "上游网关异常", 503: "上游服务暂不可用", 504: "上游网关超时"}.get(http_status, "上游请求失败")
@@ -757,8 +786,10 @@ async def organize(settings: Settings, snapshot, messages, *, trace=None):
                         "[content_shape] 服务方响应超过大小上限，费用预留已保留。",
                         diagnostics(oversized)), [])
         stage = "envelope_json"
+        trace.stage = stage
         envelope = json.loads(data)
     except (httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError, RecursionError) as error:
+        trace.exception_type = transport_exception_type(error)
         if isinstance(error, httpx.TimeoutException):
             code = "transport_timeout"
         elif isinstance(error, httpx.HTTPError):
@@ -772,6 +803,7 @@ async def organize(settings: Settings, snapshot, messages, *, trace=None):
             f"[{code}] 服务方响应或计费用量尚未确认。费用预留已保留，不会自动再次调用。",
             diagnostic), [])
     stage = "response_validation"
+    trace.stage = stage
     diagnostic = diagnostics()
     usage = parse_usage(envelope, snapshot)
     if usage.budget_violation:

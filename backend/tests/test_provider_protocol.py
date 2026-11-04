@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from app.config import Settings
-from app.failure_artifacts import ProviderTrace
+from app.failure_artifacts import NETWORK_EVENTS, ProviderTrace
 from app.provider import (
     ProtocolError, json_candidate_diagnostics, normalize_entries, organize, parse_generated_document,
     provider_messages, snapshot_for, source_aliases,
@@ -92,6 +92,35 @@ def test_optional_trace_keeps_wire_request_and_shared_body_without_changing_requ
     assert trace.http_status == 200 and trace.body_read_complete and not trace.response_truncated
     assert "headers" not in trace.request and settings.api_key not in json.dumps(trace.request)
     assert PRIVATE_MARKER not in repr(trace) and PRIVATE_MARKER not in outcome.message
+
+
+def test_network_trace_retains_only_allowed_event_names_and_elapsed_times(settings, messages, monkeypatch):
+    real_client = httpx.AsyncClient
+    sensitive_info = {"host": PRIVATE_MARKER, "headers": [(b"authorization", settings.api_key.encode())],
+                      "exception": RuntimeError(PRIVATE_MARKER)}
+
+    async def handler(request):
+        callback = request.extensions["trace"]
+        for name in ("connection.connect_tcp.started", "connection.connect_tcp.complete",
+                     "http11.send_request_body.complete", "http11.receive_response_headers.complete",
+                     "http11.response_closed.complete", PRIVATE_MARKER):
+            await callback(name, sensitive_info)
+        return httpx.Response(200, json=envelope(PRIVATE_MARKER))
+
+    monkeypatch.setattr("app.provider.httpx.AsyncClient",
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    trace = ProviderTrace()
+    snapshot, _ = snapshot_for(settings, messages)
+    result = asyncio.run(organize(settings, snapshot, messages, trace=trace))
+    diagnostic = trace.diagnostics()
+    assert diagnostic["request_sent"] and diagnostic["response_headers_received"]
+    assert diagnostic["network_stage"] == "complete"
+    assert set(diagnostic["network_events"]) <= NETWORK_EVENTS
+    assert len(diagnostic["network_events"]) == 4
+    assert all(type(value) is int and 0 <= value <= 1_000_000_000
+               for value in diagnostic["network_events"].values())
+    public_state = result.message + repr(trace) + json.dumps(diagnostic)
+    assert PRIVATE_MARKER not in public_state and settings.api_key not in public_state
 
 
 @pytest.mark.parametrize("mode", ["complete_error", "partial_error", "oversized"])

@@ -225,6 +225,30 @@ class RuntimeWatchTests(unittest.TestCase):
         self.assertEqual(failed["error_code"], "database_read_failed")
         self.assertFalse(Path(missing).exists())
 
+    def test_network_timeout_diagnostics_hide_transport_info_and_ignore_timings_in_fingerprint(self):
+        for index, elapsed in enumerate((90001, 90020)):
+            self.add_job(f"timeout-{index}", 105 + index, message="[runner_timeout] diagnostic=" + json.dumps({
+                "stage": "transport", "network_stage": "waiting_headers", "exception_type": "total_timeout",
+                "elapsed_ms": elapsed, "network_stage_elapsed_ms": elapsed - 70,
+                "request_sent": True, "response_headers_received": False,
+                "network_events": {"connection.connect_tcp.complete": 40,
+                    "http11.send_request_body.complete": 70, "http11.receive_response_headers.failed": elapsed,
+                    PRIVATE: 2, "http11.send_request_headers.started": {"headers": PRIVATE},
+                    "connection.start_tls.complete": -1},
+                "host": PRIVATE, "exception_message": PRIVATE, "trace_info": {"headers": PRIVATE},
+            }))
+        source, events = watch.collect_database(100, 110, 20, self.database)
+        self.assertTrue(source["complete"])
+        self.assertEqual(events[0]["category"], "upstream_failure")
+        self.assertEqual(events[0]["diagnostic"]["network_stage"], "waiting_headers")
+        self.assertTrue(events[0]["diagnostic"]["request_sent"])
+        self.assertEqual(len(events[0]["diagnostic"]["network_events"]), 3)
+        self.assertEqual(events[0]["fingerprint"], events[1]["fingerprint"])
+        self.assertNotIn(PRIVATE, json.dumps(events))
+        self.assertEqual(watch.safe_diagnostic({"network_stage": PRIVATE, "exception_type": PRIVATE,
+            "network_stage_elapsed_ms": True, "request_sent": 1, "response_headers_received": PRIVATE,
+            "network_events": {"connection.connect_tcp.complete": True, PRIVATE: 2}}), {"network_events": {}})
+
     def test_json_diagnostics_filter_raw_errors_and_ignore_location_in_fingerprint(self):
         for index, offset in enumerate([12, 50]):
             self.add_job(f"json-{index}", 105 + index, status="failed", message="[json] diagnostic=" + json.dumps({

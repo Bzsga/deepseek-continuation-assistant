@@ -91,6 +91,9 @@ internal data class TaskChunk(
     val remoteJobId: String = "",
     val remoteStatus: String = "",
     val attempt: Int = 0,
+    // Durable before a POST: a lost response must reuse this exact chunk and idempotency key.
+    val requestStarted: Boolean = false,
+    val inFlight: Boolean = false,
 )
 
 @Serializable
@@ -116,12 +119,38 @@ internal data class TaskRecord(
 
     fun currentRemoteId(): String = chunks.firstOrNull { !it.completed }?.remoteJobId.orEmpty()
 
-    fun chunksForExplicitResume(): List<TaskChunk> = chunks.flatMap { chunk ->
+    /** Older serial tasks only recorded the aggregate inFlight/uncertain flags. */
+    fun chunksWithRecordedRequests(): List<TaskChunk> {
+        if (!inFlight || chunks.any { it.requestStarted || it.inFlight }) return chunks
+        val legacyActiveId = chunks.firstOrNull { !it.completed }?.id ?: return chunks
+        return chunks.map { if (it.id == legacyActiveId) it.copy(requestStarted = true) else it }
+    }
+
+    fun hasUnknownRequest(): Boolean = chunksWithRecordedRequests().any {
+        !it.completed && it.requestStarted && it.remoteJobId.isBlank() &&
+            it.remoteStatus !in setOf("failed", "uncertain", "cancelled", "expired")
+    }
+
+    fun hasUncertainRequest(): Boolean = hasUnknownRequest() || chunks.any {
+        !it.completed && it.remoteStatus in setOf("uncertain", "expired")
+    }
+
+    fun withoutInFlight(): TaskRecord = copy(inFlight = false,
+        chunks = chunksWithRecordedRequests().map { if (it.inFlight) it.copy(inFlight = false) else it })
+
+    fun updateChunk(chunkId: String, update: (TaskChunk) -> TaskChunk): TaskRecord {
+        val updated = chunks.map { if (it.id == chunkId) update(it) else it }
+        return copy(chunks = updated, inFlight = updated.any { it.inFlight && !it.completed })
+    }
+
+    fun chunksForExplicitResume(): List<TaskChunk> = chunksWithRecordedRequests().flatMap { original ->
+        val chunk = if (original.inFlight) original.copy(inFlight = false) else original
         val terminal = chunk.remoteStatus in setOf("failed", "uncertain", "cancelled", "expired")
         // A live or as-yet-unknown remote request must be polled by its original
         // identity. Only an explicit resume may replace known terminal work.
-        if (chunk.completed || (chunk.remoteJobId.isNotBlank() && !terminal)) return@flatMap listOf(chunk)
-        val retry = if (terminal) chunk.copy(remoteJobId = "", remoteStatus = "", attempt = chunk.attempt + 1) else chunk
+        if (chunk.completed || ((chunk.remoteJobId.isNotBlank() || chunk.requestStarted) && !terminal)) return@flatMap listOf(chunk)
+        val retry = if (terminal) chunk.copy(remoteJobId = "", remoteStatus = "", attempt = chunk.attempt + 1,
+            requestStarted = false) else chunk
         val pieces = budgetedChunks(chunk.messages, settings)
         if (pieces.size <= 1) return@flatMap listOf(retry)
         pieces.mapIndexed { index, piece ->
@@ -135,7 +164,7 @@ internal data class TaskRecord(
 
     fun afterProcessDeath(): TaskRecord {
         if (status !in setOf("queued", "running")) return this
-        return copy(status = "paused", uncertain = uncertain || (inFlight && currentRemoteId().isEmpty()),
+        return withoutInFlight().copy(status = "paused", uncertain = uncertain || hasUncertainRequest(),
             message = if (inFlight && settings.mode == "companion") "应用中断，已保留进度。上次请求可能已占用免费次数，恢复前请检查任务状态。"
             else if (inFlight) "应用中断，已保留进度。请求可能已计费，恢复前请检查任务状态。"
             else "应用中断，已保留进度，可继续整理。")

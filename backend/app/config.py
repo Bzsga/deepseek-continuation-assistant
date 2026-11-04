@@ -36,6 +36,7 @@ class Settings:
     provider_timeout_seconds: float = 90
     cleanup_interval_seconds: float = 30
     worker_enabled: bool = True
+    worker_concurrency: int = 2
     max_body_bytes: int = 65536
     max_response_bytes: int = 65536
     failure_artifacts_enabled: bool = True
@@ -67,6 +68,8 @@ class Settings:
         return result
 
     def validate(self):
+        if type(self.worker_concurrency) is not int or not 1 <= self.worker_concurrency <= 5:
+            raise ValueError("WORKER_CONCURRENCY 须为 1 到 5 的整数")
         if type(self.failure_artifacts_enabled) is not bool:
             raise ValueError("FAILURE_ARTIFACTS_ENABLED 必须为 true 或 false")
         if type(self.failure_artifacts_ttl_hours) is not int or not 1 <= self.failure_artifacts_ttl_hours <= 168:
