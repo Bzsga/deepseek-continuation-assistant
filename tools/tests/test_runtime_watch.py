@@ -256,8 +256,22 @@ class RuntimeWatchTests(unittest.TestCase):
                                                "json_invisible_prefix": PRIVATE,
                                                "json_has_object_candidate": 1}), {})
         self.assertEqual(watch.safe_diagnostic({"prompt_version": 2}), {"prompt_version": 2})
-        for invalid_version in (True, 2.0, 4, "3", PRIVATE):
+        self.assertEqual(watch.safe_diagnostic({"prompt_version": 4}), {"prompt_version": 4})
+        for invalid_version in (True, 2.0, 5, "3", PRIVATE):
             self.assertEqual(watch.safe_diagnostic({"prompt_version": invalid_version}), {})
+
+    def test_schema_shapes_exclude_private_keys_values_and_invalid_counts(self):
+        safe = {"schema_layout": "wrapped", "schema_item_count": 2, "schema_other_fields": 1,
+                "schema_normalized": True, "schema_fields": {"result": "object", "entries": "array"}}
+        result = watch.safe_diagnostic({**safe, "schema_fields": {
+            **safe["schema_fields"], PRIVATE: "string", "text": PRIVATE, "content": {"body": PRIVATE}},
+            "schema_raw": PRIVATE, "schema_keys": [PRIVATE]})
+        self.assertEqual(result, safe)
+        self.assertNotIn(PRIVATE, json.dumps(result))
+        for invalid in (True, -1, 1.5, 1_000_001, PRIVATE):
+            self.assertEqual(watch.safe_diagnostic({"schema_item_count": invalid,
+                                                   "schema_other_fields": invalid}), {})
+        self.assertEqual(watch.safe_diagnostic({"schema_layout": PRIVATE, "schema_normalized": 1}), {})
 
     def test_journal_exports_only_error_classes_and_allowed_frames(self):
         body = '\n'.join([

@@ -32,6 +32,10 @@ JSON_ERROR_TYPES = {"expected_value", "expected_property", "expected_comma", "ex
                     "unexpected_bom", "syntax", "duplicate_key", "non_finite_number", "invalid_wrapper", "parser_limit"}
 JSON_WRAPPERS = {"plain", "json_fence", "bare_fence", "invalid_fence", "unsupported_fence"}
 JSON_FIRST_CHARACTERS = {"empty", "object", "array", "string", "backtick", "markup", "format", "control", "number", "letter", "other"}
+SCHEMA_LAYOUTS = {"canonical", "array", "wrapped", "alias", "grouped", "unrecognized", "ambiguous"}
+SCHEMA_FIELDS = {"entries", "items", "data", "result", "output", "archive", "BACKGROUND", "PEOPLE",
+                 "DECISIONS", "RECENT", "QUOTES", "text", "content", "sourceIds", "source_ids",
+                 "category", "kind", "error", "refusal"}
 USAGE_FIELDS = {
     "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens", "total_tokens",
     "prompt_tokens_details", "completion_tokens_details",
@@ -83,7 +87,7 @@ def safe_diagnostic(value):
             result[name] = number
     for name in ("has_error", "has_refusal", "has_reasoning", "json_has_bom", "body_read_complete",
                  "json_invisible_prefix", "json_edge_format_removed", "json_has_object_candidate",
-                 "json_has_array_candidate", "json_scan_limited"):
+                 "json_has_array_candidate", "json_scan_limited", "schema_normalized"):
         if type(value.get(name)) is bool:
             result[name] = value[name]
     for name in ("root", "choices_type", "usage_type", "content_type", "reasoning_content_type"):
@@ -94,15 +98,25 @@ def safe_diagnostic(value):
     if value.get("stage") in ("transport", "envelope_json", "response_validation"):
         result["stage"] = value["stage"]
     for name, allowed in (("json_error_type", JSON_ERROR_TYPES), ("json_wrapper", JSON_WRAPPERS),
-                          ("json_first_char", JSON_FIRST_CHARACTERS)):
+                          ("json_first_char", JSON_FIRST_CHARACTERS), ("schema_layout", SCHEMA_LAYOUTS)):
         if isinstance(value.get(name), str) and value[name] in allowed:
             result[name] = value[name]
     count = value.get("json_candidate_count")
     if type(count) is int and 0 <= count <= 2:
         result["json_candidate_count"] = count
     prompt_version = value.get("prompt_version")
-    if type(prompt_version) is int and prompt_version in {2, 3}:
+    if type(prompt_version) is int and prompt_version in {2, 3, 4}:
         result["prompt_version"] = prompt_version
+    for name in ("schema_item_count", "schema_other_fields"):
+        count = value.get(name)
+        if type(count) is int and 0 <= count <= 1_000_000:
+            result[name] = count
+    fields = value.get("schema_fields")
+    if isinstance(fields, dict):
+        result["schema_fields"] = {
+            name: fields[name] for name in sorted(SCHEMA_FIELDS)
+            if isinstance(fields.get(name), str) and fields[name] in VALUE_TYPES
+        }
     fields = value.get("usage_fields")
     if isinstance(fields, dict):
         result["usage_fields"] = {
