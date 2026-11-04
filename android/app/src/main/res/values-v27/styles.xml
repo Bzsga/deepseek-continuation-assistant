@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.Continuation" parent="Theme.Continuation.Base">
+        <item name="android:navigationBarColor">#EEF4FB</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

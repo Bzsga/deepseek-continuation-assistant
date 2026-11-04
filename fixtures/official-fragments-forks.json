@@ -1,0 +1,38 @@
+[
+  {
+    "id": "fixture-official-fragments",
+    "title": "演示 · 保留两个回答分支",
+    "inserted_at": "2026-11-01T08:00:00Z",
+    "updated_at": "2026-11-01T08:02:00Z",
+    "mapping": {
+      "root": { "parent": null, "message": null },
+      "question": {
+        "parent": "root",
+        "message": {
+          "inserted_at": "2026-11-01T08:00:00Z",
+          "fragments": [
+            { "type": "REQUEST", "content": "这是离线演示。我在写一部科幻小说，主角叫林舟。请保留我的原话，建议需要单独标注。" },
+            { "type": "FILE", "files": [{ "file_name": "世界观草稿.pdf", "mime_type": "application/pdf", "size": 1234 }] }
+          ]
+        }
+      },
+      "old-answer": {
+        "parent": "question",
+        "message": {
+          "inserted_at": "2026-11-01T08:01:00Z",
+          "fragments": [{ "type": "RESPONSE", "content": "可以考虑把空间站设在木星轨道。这是一条创作建议。" }]
+        }
+      },
+      "new-answer": {
+        "parent": "question",
+        "message": {
+          "inserted_at": "2026-11-01T08:02:00Z",
+          "fragments": [
+            { "type": "THINK", "content": "这段推理过程不应进入聊天正文或续聊档案。" },
+            { "type": "RESPONSE", "content": "另一种建议是先写林舟收到求救信号的场景，再逐步交代空间站。" }
+          ]
+        }
+      }
+    }
+  }
+]

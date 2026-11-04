@@ -1,0 +1,86 @@
+# 自托管整理后端
+
+后端使用 FastAPI 和 SQLite。Android 负责分段、本地保存与续聊导出；每个后端任务只处理一段消息，最多发起一次上游请求。完整 HTTP 结构见 [contracts.md](contracts.md)。
+
+原版公开入口为 [https://digimonlegend.com/continuation-api](https://digimonlegend.com/continuation-api)。下述环境值是源码默认值或配置示例，**不表示原版服务当前配置或可用额度**。
+
+## 本地启动
+
+需要 Python 3.10+。在 `backend` 目录创建并激活虚拟环境后：
+
+```text
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log --no-proxy-headers
+```
+
+`.env.example` 只是模板，程序不会自动读取。需要把变量传给启动进程。默认真实 API 关闭；本地模拟可设置 `MOCK_MODE=true`，模拟结果明确标记且不调用上游。测试依赖及运行方法见 [building.md](building.md)。
+
+同一 SQLite 数据库只运行一个服务实例/worker，文件锁会阻止重复处理。数据库路径默认是相对路径 `data/companion.sqlite3`；部署时使用持久存储，并将数据库、环境配置及备份保持私有。
+
+## 启用真实服务
+
+| 配置 | 用途 |
+| --- | --- |
+| `API_ENABLED=true`、`MOCK_MODE=false` | 启用真实调用 |
+| `BASE_URL`、`MODEL`、`API_KEY` | 运营者自己的 HTTPS 兼容上游及密钥 |
+| `PUBLIC_ENABLED=true` | 开放匿名计次模式 |
+| `DAILY_LIMIT`、`USER_DAILY_LIMIT` | 全站与个人每日次数；源码默认 50/5，0 表示无可用容量 |
+| `CONTEXT_TOKENS`、`MAX_OUTPUT_TOKENS` | 上下文和输出预算，应依据所选上游能力设置 |
+| `PROVIDER_TIMEOUT_SECONDS` | 请求总时限 |
+| `ADMIN_PASSWORD_HASH` | 手机开发者入口的管理员密码摘要 |
+| `INPUT_PRICE_PER_MILLION`、`OUTPUT_PRICE_PER_MILLION` | 可选的人民币/百万 token 单价，用于金额估算 |
+
+不要把 API Key 写入 APK 或公开仓库。运营者自行承担上游费用；匿名身份不是跨设备的自然人身份，同一人重装或换设备可能取得新身份，全站限额仍需独立设置。
+
+对外提供服务应使用 HTTPS 反向代理，应用进程绑定私有监听地址，保留 `--no-proxy-headers`。当前管理限流只在 socket 来源为 loopback 时信任代理覆写的 `X-Real-IP`；代理必须覆盖客户端提供的此头部。普通写入保留请求体大小上限，只有反馈提交路径需要 4.5 MiB。不要在访问日志、错误日志或磁盘缓冲中记录请求正文、密钥及 bearer。
+
+`GET /health` 用于健康检查；worker 异常停止或清理器出错时返回 503。仓库提供 Dockerfile，但现有发行验证不包含容器构建结论。
+
+## 管理登录
+
+管理员密码使用随机 16 字节盐及 PBKDF2-SHA256（600000 次），格式为：
+
+```text
+pbkdf2_sha256$600000$<URL-safe Base64 salt，无等号填充>$<URL-safe Base64 digest，无等号填充>
+```
+
+可在可信本机 Python 环境运行以下代码生成摘要，再通过私有进程环境设置 `ADMIN_PASSWORD_HASH`：
+
+```python
+import base64, getpass, hashlib, secrets
+salt = secrets.token_bytes(16)
+digest = hashlib.pbkdf2_hmac("sha256", getpass.getpass("Admin password: ").encode(), salt, 600000)
+encode = lambda value: base64.urlsafe_b64encode(value).decode().rstrip("=")
+print("pbkdf2_sha256$600000$" + encode(salt) + "$" + encode(digest))
+```
+
+`POST /v1/admin/login` 成功后返回 12 小时管理员 bearer 会话；服务端只保存会话摘要。五次近期登录失败会触发来源地址限流。可选 `ADMIN_TOKEN` 是独立运维凭据，不应放入普通客户端。
+
+`GET/PATCH /v1/admin/config` 用于运行配置。上游密钥只写入，响应仅显示是否配置。SQLite 内的运行时覆盖值优先于环境默认值，重启不会把它们重置。管理界面的统计和用户列表仅提供匿名身份与用量，不提供聊天正文。
+
+## 计次、幂等与恢复
+
+- `POST /v1/sessions` 创建匿名凭据；`GET /v1/quota` 返回服务状态及个人/全站已用、预留和剩余次数。按北京时间零点划分日期。
+- `POST /v1/jobs` 在事务中预留一次；派发前重新检查配置和额度，再把预留转为已用。已派发的失败、取消或不确定请求仍计次。
+- 同一用户、相同幂等编号及内容返回原任务，不重复预留；相同编号改内容返回 409。排队取消释放预留，启动后的请求不自动重发。
+- `GET /v1/jobs/{id}` 和取消接口仅对所属身份开放。到期任务及同编号重放返回 410。
+- 上限降低或模型配置变化可能使旧排队任务失效并释放预留；已开始任务保留原配置快照。提高次数后，客户端须重新读取配额，已用次数不会被清零。
+- 重启把原运行中任务标为 `uncertain`，保留必要账务；已完成片段由客户端保留。跨日未开始的预留继续占用容量。
+
+请求还受正文字符数、消息条数、请求体字节数和实际模型上下文限制；详情见协议，不应只通过增大输出预算解决所有错误。
+
+## 模型输出与用量
+
+每次请求将来源编号映射为短别名 `m1/m2…`，返回后严格还原。未知来源、必需字段错误或无效 JSON 会失败；角色不一致时保守分类。只容忍完整代码围栏及已知边缘格式字符，不会从自然语言中提取片段当作成功结果，也不自动调用模型修复。
+
+新任务保存提示协议 v3，旧 v2/缺省版本保留原提示与预留边界。诊断仅记录类型、大小、位置及版本等受限元数据。DeepSeek 兼容参数是否被第三方网关采用，取决于实际服务实现。
+
+`usage_known` 和 `cost_known` 独立。用量必须是完整、不冲突的输入/输出配对。未知用量的 0 是占位值，不代表免费；token 统计只累计可信部分。公开计次且单价未配置时，完整结果经结构与来源校验后可以在未知用量下交付；历史金额模式则继续保留不确定费用预留。
+
+## 保留与扩展接口
+
+终态任务正文和整理结果 24 小时后过期，清理器删除内容，保留幂等与账务元数据；上游服务商的保留政策另计。原始模型响应不落库。参见 [隐私说明](privacy.md)。
+
+[意见箱](feedback.md) 和 [诊断](diagnostics.md) 使用独立数据表与限额，不消耗模型次数。反馈 worker 接口仅提供已批准内容的领取与结果回写；Web 服务本身不会执行提交者命令，也不附带任何已启用的自动开发任务。自行接入 worker 时需要独立授权与私有密钥管理。
+
+历史邀请码及金额账务仍保留，公开模式关闭时可使用 `python -m app.admin` 的 `invite`、`cap`、`uncertain`、`reconcile`、`purge` 子命令；先查看各命令 `--help`。金额核对只依据实际账单结算，不重新发送模型请求。

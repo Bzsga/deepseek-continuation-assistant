@@ -1,0 +1,77 @@
+package app.banzhan.deepseekcontinuation.data
+
+import app.banzhan.deepseekcontinuation.core.ArchiveEntry
+import app.banzhan.deepseekcontinuation.core.ArchiveLogic
+import app.banzhan.deepseekcontinuation.core.MergeResult
+import java.time.OffsetDateTime
+
+internal fun settingsForSave(previous: ServiceSettings, requested: ServiceSettings): ServiceSettings {
+    val cleaned = validateSettings(requested)
+    return cleaned.copy(
+        apiKey = if (cleaned.baseUrl != previous.baseUrl && cleaned.apiKey == previous.apiKey) "" else cleaned.apiKey,
+        trialToken = if (cleaned.companionUrl != previous.companionUrl) "" else cleaned.trialToken,
+    )
+}
+
+internal fun migrateUnconfiguredService(settings: ServiceSettings): ServiceSettings {
+    val defaults = ServiceSettings()
+    val untouchedByok = settings.mode == "byok" && settings.apiKey.isBlank() &&
+        settings.baseUrl.trimEnd('/') == defaults.baseUrl && settings.model == defaults.model &&
+        settings.contextTokens == defaults.contextTokens && settings.maxOutputTokens == defaults.maxOutputTokens &&
+        settings.inputPricePerMillion == null && settings.outputPricePerMillion == null
+    return if (untouchedByok) settings.copy(mode = "companion") else settings
+}
+
+internal fun companionIdentityKey(serviceUrl: String): String =
+    "companion_identity:" + hash(SummaryNetwork.checkedBase(serviceUrl).toString().trimEnd('/'))
+
+internal fun sameCompanionIdentity(first: ServiceSettings, second: ServiceSettings): Boolean =
+    first.mode == "companion" && second.mode == "companion" && first.trialToken == second.trialToken &&
+        runCatching { companionIdentityKey(first.companionUrl) == companionIdentityKey(second.companionUrl) }.getOrDefault(false)
+
+internal fun settingsWithServerBudget(settings: ServiceSettings, quota: CompanionQuota): ServiceSettings {
+    val context = quota.contextTokens ?: error("服务未提供分段预算，请刷新免费额度或联系管理员更新服务。")
+    val output = quota.maxOutputTokens ?: error("服务未提供输出预算，请刷新免费额度或联系管理员更新服务。")
+    require(quota.model.isNotBlank()) { "免费服务尚未配置模型，请稍后再试。" }
+    val captured = settings.copy(model = quota.model, contextTokens = context, maxOutputTokens = output)
+    validateSettings(captured)
+    SummaryProtocol.chunkCharacters(captured)
+    return captured
+}
+
+internal fun developerSessionExpired(prefs: DeveloperPrefs): Boolean = runCatching {
+    OffsetDateTime.parse(prefs.expiresAt).toInstant().toEpochMilli() <= System.currentTimeMillis()
+}.getOrDefault(true)
+
+internal fun developerPrefsForService(prefs: DeveloperPrefs, serviceUrl: String): DeveloperPrefs {
+    val normalized = SummaryNetwork.checkedBase(serviceUrl).toString().trimEnd('/')
+    return if (normalized == prefs.serviceUrl) prefs else DeveloperPrefs(serviceUrl = normalized)
+}
+
+internal fun requireTaskSlot(archiveId: String, taskId: String?, tasks: List<TaskRecord>) {
+    require(tasks.none { it.archiveId == archiveId && it.id != taskId && it.status in setOf("queued", "running", "paused") }) {
+        "该档案已有其他未完成任务，请先继续或取消它"
+    }
+}
+
+internal fun taskSourcesFit(task: TaskRecord, allowedIds: Set<String>): Boolean =
+    task.chunks.all { chunk -> chunk.messages.all { it.id in allowedIds } }
+
+/** Accumulate every successful piece without putting chunk boundaries into entry identity. */
+internal fun aggregateChunkEntries(parts: List<List<ArchiveEntry>>): List<ArchiveEntry> =
+    parts.flatten().groupBy { it.id }.values.map { group ->
+        val first = group.first()
+        require(group.all { it.category == first.category && it.kind == first.kind && it.sourceIds.toSet() == first.sourceIds.toSet() }) { "分块来源身份不一致" }
+        val text = group.map { it.text }.distinct().joinToString("\n")
+        require(text.length <= 100_000) { "同一来源的摘要超过档案条目上限，分块结果已保存" }
+        first.copy(text = text, pinned = false, edited = false, deleted = false)
+    }
+
+internal fun mergeTaskProgress(
+    existing: List<ArchiveEntry>, previousProgress: List<ArchiveEntry>, currentProgress: List<ArchiveEntry>,
+): MergeResult {
+    val previousById = previousProgress.associateBy { it.id }
+    // Only replace an unchanged output produced by this task. User edits and tombstones stay protected.
+    val preserved = existing.filterNot { entry -> !entry.edited && !entry.pinned && !entry.deleted && entry == previousById[entry.id] }
+    return ArchiveLogic.merge(preserved, currentProgress)
+}
