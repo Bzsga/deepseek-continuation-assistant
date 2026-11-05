@@ -38,6 +38,9 @@ enum class EntryCategory { BACKGROUND, PEOPLE, DECISIONS, RECENT, QUOTES }
 enum class EntryKind { USER_FACT, ASSISTANT_SUGGESTION, UNCONFIRMED }
 
 @Serializable
+enum class ContinuityCue { PREFERENCE, CORRECTION, SHARED_LANGUAGE, OPEN_THREAD }
+
+@Serializable
 data class ArchiveEntry(
     val id: String,
     val category: EntryCategory,
@@ -47,6 +50,7 @@ data class ArchiveEntry(
     val pinned: Boolean = false,
     val edited: Boolean = false,
     val deleted: Boolean = false,
+    val continuityCue: ContinuityCue? = null,
 )
 
 @Serializable

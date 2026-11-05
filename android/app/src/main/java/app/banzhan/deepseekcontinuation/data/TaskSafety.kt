@@ -29,13 +29,14 @@ internal fun sameCompanionIdentity(first: ServiceSettings, second: ServiceSettin
     first.mode == "companion" && second.mode == "companion" && first.trialToken == second.trialToken &&
         runCatching { companionIdentityKey(first.companionUrl) == companionIdentityKey(second.companionUrl) }.getOrDefault(false)
 
-internal fun settingsWithServerBudget(settings: ServiceSettings, quota: CompanionQuota): ServiceSettings {
+internal fun settingsWithServerBudget(settings: ServiceSettings, quota: CompanionQuota,
+    promptVersion: String = SummaryProtocol.PROMPT_VERSION): ServiceSettings {
     val context = quota.contextTokens ?: error("服务未提供分段预算，请刷新免费额度或联系管理员更新服务。")
     val output = quota.maxOutputTokens ?: error("服务未提供输出预算，请刷新免费额度或联系管理员更新服务。")
     require(quota.model.isNotBlank()) { "免费服务尚未配置模型，请稍后再试。" }
     val captured = settings.copy(model = quota.model, contextTokens = context, maxOutputTokens = output)
     validateSettings(captured)
-    SummaryProtocol.chunkCharacters(captured)
+    SummaryProtocol.chunkCharacters(captured, promptVersion)
     return captured
 }
 
@@ -86,7 +87,8 @@ internal fun TaskRecord.afterDispatchFailures(failures: List<ChunkDispatchFailur
 internal fun aggregateChunkEntries(parts: List<List<ArchiveEntry>>): List<ArchiveEntry> =
     parts.flatten().groupBy { it.id }.values.map { group ->
         val first = group.first()
-        require(group.all { it.category == first.category && it.kind == first.kind && it.sourceIds.toSet() == first.sourceIds.toSet() }) { "分块来源身份不一致" }
+        require(group.all { it.category == first.category && it.kind == first.kind && it.sourceIds.toSet() == first.sourceIds.toSet() &&
+            it.continuityCue == first.continuityCue }) { "分块来源身份不一致" }
         val text = group.map { it.text }.distinct().joinToString("\n")
         require(text.length <= 100_000) { "同一来源的摘要超过档案条目上限，分块结果已保存" }
         first.copy(text = text, pinned = false, edited = false, deleted = false)

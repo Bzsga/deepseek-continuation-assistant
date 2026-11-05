@@ -714,7 +714,8 @@ class AppController internal constructor(application: Application, databaseName:
                 val original = archive.entries.getOrNull(previous)
                 val contentChanged = original == null || original.text != entry.text ||
                     original.category != entry.category || original.kind != entry.kind || original.sourceIds != entry.sourceIds
-                val updated = entry.copy(id = id, edited = original?.edited == true || contentChanged)
+                val updated = entry.copy(id = id, edited = original?.edited == true || contentChanged,
+                    continuityCue = if (contentChanged) null else original?.continuityCue)
                 val entries = archive.entries.toMutableList()
                 if (previous < 0) entries.add(updated) else entries[previous] = updated
                 saveArchive(archive.copy(entries = entries))
@@ -835,7 +836,7 @@ class AppController internal constructor(application: Application, databaseName:
                 TaskChunk(chunk.id, chunk.messages, key)
             }
             val task = TaskRecord(id, archiveId, archive.title, settings.withoutSecrets(), "task:$id", records,
-                message = estimateCost(settings, records))
+                message = estimateCost(settings, records), promptVersion = SummaryProtocol.PROMPT_VERSION)
             DiagnosticLog.record("task", "prepare", mapOf("chunk_count" to records.size.toLong()))
             database.withTransaction {
                 val scoped = withSelectedSourceScope(archive, source, branchId, selectedIds)
@@ -1115,7 +1116,7 @@ class AppController internal constructor(application: Application, databaseName:
             mutex.withLock {
                 val task = loadTask(taskId)
                 if (task.cancelRequested || task.status != "queued") return
-                require(task.promptVersion == SummaryProtocol.PROMPT_VERSION) { "此任务的整理协议已更新，请取消旧任务后重新整理" }
+                require(SummaryProtocol.supportsVersion(task.promptVersion)) { "不支持此任务的整理协议版本，请保留进度并更新应用" }
                 require(taskSourcesFit(task, sourceIds(loadArchive(task.archiveId)))) { "档案来源已变化，请新建整理任务" }
                 saveTask(task.copy(status = "running", message = "正在整理，成功分块将即时保存"))
                 refresh()
@@ -1188,10 +1189,10 @@ class AppController internal constructor(application: Application, databaseName:
             return
         }
         val settings = withTaskSecret(task)
-        SummaryProtocol.validateForRequest(settings, chunk.messages)
+        SummaryProtocol.validateForRequest(settings, chunk.messages, task.promptVersion)
         val entries = if (settings.mode == "byok") {
             if (!recordChunkStart(taskId, chunk, maySubmit)) return
-            organizationNetwork.summarize(settings, chunk.messages)
+            organizationNetwork.summarize(settings, chunk.messages, task.promptVersion)
         } else runCompanionChunk(task, chunk, settings, maySubmit) ?: return
         val validated = SummaryProtocol.validateEntries(entries, chunk.messages)
         withContext(NonCancellable) { persistChunk(taskId, chunk, validated) }
@@ -1223,7 +1224,7 @@ class AppController internal constructor(application: Application, databaseName:
             if (!chunk.requestStarted) {
                 val quota = organizationNetwork.quota(settings)
                 quota.organizationBlocker()?.let { throw SummaryFailure(it, ambiguous = false) }
-                val currentBudget = settingsWithServerBudget(settings, quota)
+                val currentBudget = settingsWithServerBudget(settings, quota, task.promptVersion)
                 if (currentBudget.model != settings.model || currentBudget.contextTokens != settings.contextTokens ||
                     currentBudget.maxOutputTokens != settings.maxOutputTokens) {
                     throw SummaryFailure("免费服务配置已更新，已保留完成进度。请取消旧任务后按新配置重新整理。", ambiguous = false)
@@ -1462,14 +1463,15 @@ private fun estimateCost(settings: ServiceSettings, chunks: List<TaskChunk>): St
     return "共${chunks.size}个分块，按填写单价保守估算约 ${"%.4f".format(estimated)}，实际以服务商账单为准"
 }
 
-internal fun budgetedChunks(messages: List<ChatMessage>, settings: ServiceSettings): List<app.banzhan.deepseekcontinuation.core.SummaryChunk> {
+internal fun budgetedChunks(messages: List<ChatMessage>, settings: ServiceSettings,
+    promptVersion: String = SummaryProtocol.PROMPT_VERSION): List<app.banzhan.deepseekcontinuation.core.SummaryChunk> {
     // Context capacity is not a useful target size for a concise summary: a
     // 64k context previously produced 14k-character chunks with only 4k output.
     // Keep each request bounded by its output budget as well as input capacity.
-    var limit = minOf(SummaryProtocol.chunkCharacters(settings), (settings.maxOutputTokens * 2).coerceAtMost(6000))
+    var limit = minOf(SummaryProtocol.chunkCharacters(settings, promptVersion), (settings.maxOutputTokens * 2).coerceAtMost(6000))
     while (true) {
         val chunks = ArchiveLogic.chunks(messages, limit)
-        if (chunks.all { SummaryProtocol.estimatedInputTokens(it.messages).toLong() + settings.maxOutputTokens <= settings.contextTokens }) return chunks
+        if (chunks.all { SummaryProtocol.estimatedInputTokens(it.messages, promptVersion).toLong() + settings.maxOutputTokens <= settings.contextTokens }) return chunks
         require(limit > 2) { "来源编号或消息结构超出上下文预算，请提高上下文长度" }
         limit = (limit / 2).coerceAtLeast(2)
     }

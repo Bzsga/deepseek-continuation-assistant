@@ -208,7 +208,17 @@ def test_runner_timeout_and_shutdown_keep_partial_response(settings, monkeypatch
 
 
 @pytest.mark.parametrize("partial_body", [False, True], ids=["waiting_headers", "reading_body"])
-def test_real_loopback_runner_timeout_preserves_network_stage_and_frozen_capture(settings, partial_body):
+def test_real_loopback_runner_timeout_preserves_network_stage_and_frozen_capture(settings, partial_body, monkeypatch):
+    real_client = httpx.AsyncClient
+
+    def longer_transport_deadline(**kwargs):
+        # Isolate Runner cancellation from the competing HTTPX timer. Equal
+        # one-second deadlines can fire in either order on a busy event loop.
+        kwargs["timeout"] = httpx.Timeout(5)
+        return real_client(**kwargs)
+
+    monkeypatch.setattr("app.provider.httpx.AsyncClient", longer_transport_deadline)
+
     async def scenario():
         loop = asyncio.get_running_loop()
         release, finished = asyncio.Event(), asyncio.Event()

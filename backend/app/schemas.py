@@ -69,6 +69,7 @@ class GeneratedEntry(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     sourceIds: list[str] = Field(min_length=1, max_length=50)
     kind: Literal["USER_FACT", "ASSISTANT_SUGGESTION", "UNCONFIRMED"]
+    continuityCue: Literal["PREFERENCE", "CORRECTION", "SHARED_LANGUAGE", "OPEN_THREAD"] | None = None
 
 
 class GeneratedDocument(BaseModel):

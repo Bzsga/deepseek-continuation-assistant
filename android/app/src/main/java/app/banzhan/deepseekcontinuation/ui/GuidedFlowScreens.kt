@@ -644,7 +644,6 @@ internal fun ContinuationResultScreen(
             )
         }
         if (unfinished) item { NoticeCard("整理尚未完成，下面是目前已保存的内容。") }
-        item { ContinuitySetupCard(archive, conversations, onSaveContinuity) }
         if (export == null) {
             item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
         } else if (text == null) {
@@ -684,6 +683,7 @@ internal fun ContinuationResultScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = Blue,
                 )
+                ContinuitySetupCard(archive, conversations, onSaveContinuity)
             }
             item {
                 Surface(shape = MaterialTheme.shapes.medium) {

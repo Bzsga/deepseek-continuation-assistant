@@ -125,7 +125,7 @@ def safe_diagnostic(value):
     if type(count) is int and 0 <= count <= 2:
         result["json_candidate_count"] = count
     prompt_version = value.get("prompt_version")
-    if type(prompt_version) is int and prompt_version in {2, 3, 4}:
+    if type(prompt_version) is int and prompt_version in {2, 3, 4, 5}:
         result["prompt_version"] = prompt_version
     for name in ("schema_item_count", "schema_other_fields"):
         count = value.get(name)

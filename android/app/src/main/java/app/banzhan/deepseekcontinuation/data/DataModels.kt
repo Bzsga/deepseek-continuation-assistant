@@ -109,7 +109,8 @@ internal data class TaskRecord(
     val inFlight: Boolean = false,
     val uncertain: Boolean = false,
     val cancelRequested: Boolean = false,
-    val promptVersion: String = SummaryProtocol.PROMPT_VERSION,
+    // Missing in legacy JSON must never opt an already admitted task into a new prompt.
+    val promptVersion: String = SummaryProtocol.LEGACY_PROMPT_VERSION,
 ) {
     fun display() = OrganizationTask(
         id, archiveId, label, status, chunks.count { it.completed }, chunks.size, message,
@@ -151,7 +152,7 @@ internal data class TaskRecord(
         if (chunk.completed || ((chunk.remoteJobId.isNotBlank() || chunk.requestStarted) && !terminal)) return@flatMap listOf(chunk)
         val retry = if (terminal) chunk.copy(remoteJobId = "", remoteStatus = "", attempt = chunk.attempt + 1,
             requestStarted = false) else chunk
-        val pieces = budgetedChunks(chunk.messages, settings)
+        val pieces = budgetedChunks(chunk.messages, settings, promptVersion)
         if (pieces.size <= 1) return@flatMap listOf(retry)
         pieces.mapIndexed { index, piece ->
             val id = hash("resume-split-v1\n${chunk.id}\n${retry.attempt}\n$index\n${piece.id}")

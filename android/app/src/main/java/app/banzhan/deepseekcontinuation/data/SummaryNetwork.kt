@@ -142,8 +142,9 @@ object SummaryNetwork {
         return ConnectionTestResult(reply, model)
     }
 
-    suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>): List<ArchiveEntry> {
-        val body = SummaryProtocol.requestBody(settings, messages)
+    suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>,
+        promptVersion: String = SummaryProtocol.PROMPT_VERSION): List<ArchiveEntry> {
+        val body = SummaryProtocol.requestBody(settings, messages, promptVersion)
         val request = authenticated(chatEndpoint(settings.baseUrl), settings.apiKey)
             .post(body.toRequestBody(contentType)).build()
         val response = exchange(request, mutation = true, secrets = listOf(settings.apiKey))

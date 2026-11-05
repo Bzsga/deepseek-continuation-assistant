@@ -237,7 +237,7 @@ object ArchiveLogic {
 
     private fun sameContent(a: ArchiveEntry, b: ArchiveEntry): Boolean =
         a.category == b.category && a.text == b.text && a.kind == b.kind &&
-            a.sourceIds.toSet() == b.sourceIds.toSet()
+            a.sourceIds.toSet() == b.sourceIds.toSet() && a.continuityCue == b.continuityCue
 
     private fun protection(entry: ArchiveEntry): Int =
         (if (entry.deleted) 4 else 0) + (if (entry.edited) 2 else 0) + (if (entry.pinned) 1 else 0)

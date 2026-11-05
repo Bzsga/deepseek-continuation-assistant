@@ -89,6 +89,18 @@ class ArchiveLogicTest {
         assertEquals(listOf(EntryConflict(first, second)), result.conflicts)
     }
 
+    @Test fun cueChangesAreNotSilentlyDiscardedDuringMerge() {
+        val original = entry("same", "同一内容")
+        val proposed = original.copy(continuityCue = ContinuityCue.OPEN_THREAD)
+        val result = ArchiveLogic.merge(listOf(original), listOf(proposed))
+        assertEquals(listOf(original), result.entries)
+        assertEquals(listOf(EntryConflict(original, proposed)), result.conflicts)
+        val pinned = proposed.copy(pinned = true)
+        val sameCue = ArchiveLogic.merge(listOf(pinned), listOf(proposed))
+        assertEquals(listOf(pinned), sameCue.entries)
+        assertTrue(sameCue.conflicts.isEmpty())
+    }
+
     @Test fun storedDuplicateTombstoneTakesPriority() {
         val live = entry("id", "旧")
         val deleted = live.copy(text = "已删除", deleted = true)

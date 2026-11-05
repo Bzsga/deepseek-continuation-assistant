@@ -148,7 +148,7 @@ class ProviderTrace:
             "network_events": {name: elapsed for name, elapsed in self.network_events.items()
                                if name in NETWORK_EVENTS and type(elapsed) is int and 0 <= elapsed <= 1_000_000_000},
         }
-        if type(self.prompt_version) is int and self.prompt_version in {2, 3, 4}:
+        if type(self.prompt_version) is int and self.prompt_version in {2, 3, 4, 5}:
             result["prompt_version"] = self.prompt_version
         return result
 

@@ -5,8 +5,6 @@ package app.banzhan.deepseekcontinuation.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,26 +29,19 @@ internal fun ContinuitySetupCard(
     onSave: suspend (ContinuitySettings) -> Unit,
 ) {
     var editing by rememberSaveable(archive.id) { mutableStateOf(false) }
-    Card(
-        onClick = { editing = true },
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("接着上次聊", fontWeight = FontWeight.SemiBold, color = Blue)
-                Text(
-                    if (archive.continuity.enabled) "已开启 · 调整原话、交流方式和下一句话"
-                    else "选择想带上的原话，补上接下来想说的话",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Icon(Icons.Outlined.ChevronRight, "设置接着上次聊", tint = Blue)
-        }
+    ActionRow {
+        Text(
+            when {
+                !archive.continuity.enabled -> "沿用已保存内容"
+                archive.generationMode == "original" -> "已保留所选原文"
+                archive.continuity.selectedFragmentIds == null -> "续聊原话自动选择"
+                else -> "续聊使用已保存设置"
+            },
+            Modifier.align(Alignment.CenterVertically),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TextButton(onClick = { editing = true }) { Text("调整（可选）") }
     }
     if (editing)
         ContinuityEditor(archive, conversations, { editing = false }, onSave)
@@ -70,16 +61,24 @@ internal fun ContinuityEditor(
     }
     var interactionNotes by rememberSaveable(archive.id) { mutableStateOf(archive.continuity.interactionNotes) }
     var nextMessage by rememberSaveable(archive.id) { mutableStateOf(archive.continuity.nextMessage) }
-    var plan by remember(archive, conversations) { mutableStateOf<Result<ContinuityPlan>?>(null) }
+    val planningArchive = remember(archive, selected == null) {
+        if (selected == null) archive.copy(continuity = archive.continuity.copy(selectedFragmentIds = null))
+        else archive
+    }
+    var plan by remember(planningArchive, conversations) { mutableStateOf<Result<ContinuityPlan>?>(null) }
     var preview by remember { mutableStateOf<ContinuityFragment?>(null) }
+    var showRecent by rememberSaveable(archive.id) { mutableStateOf(false) }
+    var showFragments by rememberSaveable(archive.id) { mutableStateOf(false) }
+    var showNotes by rememberSaveable(archive.id) { mutableStateOf(false) }
+    var showSourceDetails by rememberSaveable(archive.id) { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    LaunchedEffect(archive, conversations) {
+    LaunchedEffect(planningArchive, conversations) {
         plan = withContext(Dispatchers.Default) {
             runCatching {
                 ContinuityLogic.buildPlan(
-                    archive,
+                    planningArchive,
                     conversations,
                 )
             }
@@ -131,7 +130,6 @@ internal fun ContinuityEditor(
             }
         },
     ) {
-        Text("保留聊到哪里、怎么聊，再接上你想说的话。现有整理内容会继续保留。", style = MaterialTheme.typography.bodyMedium)
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -149,7 +147,7 @@ internal fun ContinuityEditor(
         ) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("最近对话", fontWeight = FontWeight.SemiBold)
-                Text("带上最近聊到的几轮原话", style = MaterialTheme.typography.bodySmall,
+                Text("自动带上最近聊到的几轮原话", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Switch(includeRecent, { includeRecent = it },
@@ -158,37 +156,65 @@ internal fun ContinuityEditor(
         if (plan == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         candidates?.let { available ->
             if (available.recentFragments.isEmpty()) {
-                Text("没有可带入的最近原文。仍可使用现有整理内容，并补充下方两项。",
+                Text("没有可确认的最近原文，仍会保留现有整理内容。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
-                available.recentFragments.forEach { fragment ->
-                    ContinuityFragmentCard(fragment, onPreview = { preview = fragment })
+                TextButton(onClick = { showRecent = !showRecent }) {
+                    Text(if (showRecent) "收起最近原话" else "查看最近原话")
+                }
+                if (showRecent) {
+                    available.recentFragments.forEach { fragment ->
+                        ContinuityFragmentCard(fragment, onPreview = { preview = fragment })
+                    }
                 }
             }
             HorizontalDivider()
-            Text("想保留的片段", fontWeight = FontWeight.SemiBold)
-            Text("从重要原话中推荐。点开查看上下文，再决定是否带上。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (available.recommendedFragments.isEmpty()) {
-                Text("暂时没有可推荐的原文片段。", style = MaterialTheme.typography.bodySmall)
-            } else {
-                available.recommendedFragments.forEach { fragment ->
-                    ContinuityFragmentCard(
-                        fragment,
-                        selected = fragment.id in selectedIds,
-                        enabled = enabled && !saving,
-                        onSelected = { checked ->
-                            selected = ArrayList(if (checked) selectedIds + fragment.id else selectedIds - fragment.id)
-                        },
-                        onPreview = { preview = fragment },
-                    )
+            Text(
+                when {
+                    selected == null -> "关键片段：自动选择"
+                    selectedIds.isEmpty() -> "关键片段：不附加"
+                    else -> "关键片段：已选 ${selectedIds.size} 段"
+                },
+                fontWeight = FontWeight.SemiBold,
+            )
+            ActionRow {
+                TextButton(onClick = { showFragments = !showFragments }) {
+                    Text(if (showFragments) "收起片段选择" else "手动选片段（可选）")
+                }
+                if (selected != null) {
+                    TextButton(onClick = { selected = null }, enabled = enabled && !saving) {
+                        Text("恢复自动选择")
+                    }
                 }
             }
-            available.notices.distinct().forEach { notice ->
-                Text(notice, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (showFragments) {
+                if (available.recommendedFragments.isEmpty()) {
+                    Text("没有可额外附上的原文片段。", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    available.recommendedFragments.forEach { fragment ->
+                        ContinuityFragmentCard(
+                            fragment,
+                            selected = fragment.id in selectedIds,
+                            enabled = enabled && !saving,
+                            onSelected = { checked ->
+                                selected = ArrayList(if (checked) selectedIds + fragment.id else selectedIds - fragment.id)
+                            },
+                            onPreview = { preview = fragment },
+                        )
+                    }
+                }
+            }
+            if (available.notices.isNotEmpty()) {
+                TextButton(onClick = { showSourceDetails = !showSourceDetails }) {
+                    Text(if (showSourceDetails) "收起原话说明" else "查看原话说明")
+                }
+                if (showSourceDetails) {
+                    available.notices.distinct().forEach { notice ->
+                        Text(notice, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
         plan?.exceptionOrNull()?.let {
@@ -196,30 +222,51 @@ internal fun ContinuityEditor(
                 color = MaterialTheme.colorScheme.error)
         }
         HorizontalDivider()
-        OutlinedTextField(
-            interactionNotes,
-            { interactionNotes = it },
-            Modifier.fillMaxWidth(),
-            enabled = enabled && !saving,
-            label = { Text("希望延续的交流方式") },
-            placeholder = { Text("例如：先直接回应我的疑问；有分歧时说明理由。") },
-            minLines = 3,
-            maxLines = 6,
-            isError = interactionNotes.length > 4000,
-            supportingText = { Text(if (interactionNotes.length > 4000) "最多 4000 字，请精简后保存" else "可选 · 写下你自己的偏好") },
-        )
-        OutlinedTextField(
-            nextMessage,
-            { nextMessage = it },
-            Modifier.fillMaxWidth(),
-            enabled = enabled && !saving,
-            label = { Text("接下来想说的话") },
-            placeholder = { Text("例如：关于刚才那个选择，我还有一点没想清楚……") },
-            minLines = 3,
-            maxLines = 8,
-            isError = nextMessage.length > 8000,
-            supportingText = { Text(if (nextMessage.length > 8000) "最多 8000 字，请精简后保存" else "可选 · 放在续聊内容最后") },
-        )
+        ActionRow {
+            Text(
+                when {
+                    interactionNotes.isNotBlank() && nextMessage.isNotBlank() -> "已保留交流方式和下一句话"
+                    interactionNotes.isNotBlank() -> "已保留交流方式"
+                    nextMessage.isNotBlank() -> "已保留下一句话"
+                    else -> "个人补充"
+                },
+                Modifier.align(Alignment.CenterVertically),
+                fontWeight = FontWeight.SemiBold,
+            )
+            TextButton(onClick = { showNotes = !showNotes }) {
+                Text(if (showNotes) "收起补充" else "补充（可选）")
+            }
+        }
+        if (!showNotes && (interactionNotes.length > 4000 || nextMessage.length > 8000)) {
+            Text("补充内容过长，请展开后精简。", color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall)
+        }
+        if (showNotes) {
+            OutlinedTextField(
+                interactionNotes,
+                { interactionNotes = it },
+                Modifier.fillMaxWidth(),
+                enabled = enabled && !saving,
+                label = { Text("希望延续的交流方式") },
+                placeholder = { Text("例如：先直接回应我的疑问；有分歧时说明理由。") },
+                minLines = 3,
+                maxLines = 6,
+                isError = interactionNotes.length > 4000,
+                supportingText = { Text(if (interactionNotes.length > 4000) "最多 4000 字，请精简后保存" else "可选 · 写下你自己的偏好") },
+            )
+            OutlinedTextField(
+                nextMessage,
+                { nextMessage = it },
+                Modifier.fillMaxWidth(),
+                enabled = enabled && !saving,
+                label = { Text("接下来想说的话") },
+                placeholder = { Text("例如：关于刚才那个选择，我还有一点没想清楚……") },
+                minLines = 3,
+                maxLines = 8,
+                isError = nextMessage.length > 8000,
+                supportingText = { Text(if (nextMessage.length > 8000) "最多 8000 字，请精简后保存" else "可选 · 放在续聊内容最后") },
+            )
+        }
     }
     preview?.let { fragment ->
         var previewLimit by remember(fragment.id) { mutableIntStateOf(8000) }

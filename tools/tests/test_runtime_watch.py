@@ -281,7 +281,8 @@ class RuntimeWatchTests(unittest.TestCase):
                                                "json_has_object_candidate": 1, "json_identical_duplicates": PRIVATE}), {})
         self.assertEqual(watch.safe_diagnostic({"prompt_version": 2}), {"prompt_version": 2})
         self.assertEqual(watch.safe_diagnostic({"prompt_version": 4}), {"prompt_version": 4})
-        for invalid_version in (True, 2.0, 5, "3", PRIVATE):
+        self.assertEqual(watch.safe_diagnostic({"prompt_version": 5}), {"prompt_version": 5})
+        for invalid_version in (True, 2.0, 6, "3", PRIVATE):
             self.assertEqual(watch.safe_diagnostic({"prompt_version": invalid_version}), {})
 
     def test_schema_shapes_exclude_private_keys_values_and_invalid_counts(self):

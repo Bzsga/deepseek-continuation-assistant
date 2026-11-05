@@ -10,7 +10,7 @@ internal interface OrganizationNetwork {
     suspend fun submit(settings: ServiceSettings, messages: List<ChatMessage>, key: String): RemoteJob
     suspend fun poll(settings: ServiceSettings, remoteId: String): RemoteJob
     suspend fun cancel(settings: ServiceSettings, remoteId: String): RemoteJob
-    suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>): List<ArchiveEntry>
+    suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>, promptVersion: String): List<ArchiveEntry>
 }
 
 internal object LiveOrganizationNetwork : OrganizationNetwork {
@@ -19,5 +19,6 @@ internal object LiveOrganizationNetwork : OrganizationNetwork {
     override suspend fun submit(settings: ServiceSettings, messages: List<ChatMessage>, key: String) = SummaryNetwork.submit(settings, messages, key)
     override suspend fun poll(settings: ServiceSettings, remoteId: String) = SummaryNetwork.poll(settings, remoteId)
     override suspend fun cancel(settings: ServiceSettings, remoteId: String) = SummaryNetwork.cancel(settings, remoteId)
-    override suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>) = SummaryNetwork.summarize(settings, messages)
+    override suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>, promptVersion: String) =
+        SummaryNetwork.summarize(settings, messages, promptVersion)
 }

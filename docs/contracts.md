@@ -184,7 +184,7 @@ Quota {
 - Error response detail carries useful user-facing text (Chinese supported). Duplicate idempotency key with changed payload returns 409. Job id scoped to owner. Server model fixed by configuration. `/health` read-only health.
 - Expired job bodies/results return HTTP 410, including idempotent resubmission. Android requires an explicit user confirmation before allocating a replacement key and potentially paying again.
 
-Provider snapshots now use protocol_version 3 for new jobs. Version 2 (including legacy missing-version snapshots) reconstructs the exact frozen v2 prompt and original input bound; unsupported versions and insufficient bounds fail before HTTP. V3 only adds explicit quoted-source boundaries and task/output_requirements, preserving source aliasing, output schema and fees. Diagnostics expose validated integer prompt_version 2 or 3.
+New provider snapshots use protocol_version 5. Versions 2 (including missing-version snapshots), 3 and 4 reconstruct their frozen prompts and original input bounds; unsupported versions and insufficient bounds fail before HTTP. V5 retains v4 output/count budgets and adds optional continuity classification in the same request. Diagnostics expose validated integer prompt_version 2 through 5.
 
 The provider maps each original source ID to a short per-request `m1/m2…` alias, and restores only validated aliases before returning entries. Valid sources with incompatible role classification are conservatively downgraded to `UNCONFIRMED`; unknown aliases are rejected. One complete JSON or unlabelled code fence may be unwrapped; BOM, fence whitespace and U+200B/U+2060/FEFF at the outer text edges are tolerated; characters inside JSON strings are preserved. Surrounding prose, multiple documents, truncation, duplicate keys and non-finite numbers remain invalid. Failure codes and diagnostics expose only safe structural metadata, never original model output or transcript text.
 
@@ -226,3 +226,13 @@ Android maps these payloads to `AdminConfig`, `AdminStats` (`AdminTotals`, `Admi
 - `android/` build configuration and [building.md](building.md) describe compilation, packaging, and verification setup.
 - `backend/` and `docs/backend.md` own invitation redemption, budget enforcement, organization jobs, and service operations.
 - `docs/` records integration contracts, usage, privacy and validation limits.
+
+## Automatic continuity (1.0.5)
+
+`ArchiveEntry.continuityCue` is optional and defaults to null. Its values are `PREFERENCE`, `CORRECTION`, `SHARED_LANGUAGE`, and `OPEN_THREAD`; the original category, kind, text and sourceIds remain required and unchanged. Old clients can ignore the new field and still retain the complete entry. Unknown or malformed optional cue values become null without losing the entry. PREFERENCE requires USER_FACT and exclusively user sources; CORRECTION and SHARED_LANGUAGE require at least one user source. Valid IDs establish source association, not semantic truth.
+
+The model identifies cues within the existing organization request, without an extra request, new billing path or forced per-kind count. New BYOK tasks use continuation-v1.2; persisted continuation-v1.1 tasks keep their original prompt, budget, cache key and request identity. Missing task promptVersion means v1.1. Optional cue types distinguish new summary identities, while null-cue identities remain unchanged.
+
+Enabled continuation export moves only unedited, undeleted cues with unambiguous selected branch sources into a chronological section, preserving their full text and original classifications. Other entries remain in the ordinary archive. Later explicit corrections apply only to the same topic in the same branch; no inferred supersedes relation or cross-branch chronology is created. Raw candidates may use cues as anchors but retain whole-fragment selection, source gaps and the existing reference budget. Manual edits and deletions keep priority.
+
+The main flow requires no continuity settings step. Optional adjustment preserves disabled state, explicit empty selections, null automatic selections and written notes. Upgrading does not reprocess old archives or enable disabled ones. See [conversation-continuity.md](conversation-continuity.md).

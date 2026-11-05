@@ -4,9 +4,11 @@ import app.banzhan.deepseekcontinuation.core.Archive
 import app.banzhan.deepseekcontinuation.core.ArchiveEntry
 import app.banzhan.deepseekcontinuation.core.ArchiveSourceScope
 import app.banzhan.deepseekcontinuation.core.ChatMessage
+import app.banzhan.deepseekcontinuation.core.ContinuityCue
 import app.banzhan.deepseekcontinuation.core.ContinuitySettings
 import app.banzhan.deepseekcontinuation.core.ConversationBranch
 import app.banzhan.deepseekcontinuation.core.EntryCategory
+import app.banzhan.deepseekcontinuation.core.EntryKind
 import app.banzhan.deepseekcontinuation.core.ImportedConversation
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -24,7 +26,8 @@ class ContinuityBackupValidationTest {
         ConversationBranch("other-branch", "其他", listOf(other)),
     ), currentBranchId = "main")
     private val archive = Archive("a", "续聊", listOf("c"), listOf(
-        ArchiveEntry("entry", EntryCategory.RECENT, first.content, listOf(first.id)),
+        ArchiveEntry("entry", EntryCategory.RECENT, first.content, listOf(first.id), EntryKind.USER_FACT,
+            continuityCue = ContinuityCue.PREFERENCE),
     ), updatedAt = 1, sourceScopes = listOf(ArchiveSourceScope("c", "main", listOf(first.id, reply.id))),
         continuity = ContinuitySettings(enabled = true, interactionNotes = "保持直接的表达", nextMessage = "接着聊刚才的问题。"))
 

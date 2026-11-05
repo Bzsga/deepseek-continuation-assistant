@@ -8,6 +8,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.banzhan.deepseekcontinuation.core.ArchiveEntry
 import app.banzhan.deepseekcontinuation.core.ChatMessage
+import app.banzhan.deepseekcontinuation.core.ContinuityCue
 import app.banzhan.deepseekcontinuation.core.EntryCategory
 import app.banzhan.deepseekcontinuation.core.EntryKind
 import java.util.UUID
@@ -78,6 +79,10 @@ class ParallelOrganizationTest {
         val (store, controller) = controller("parallel-order-${UUID.randomUUID()}.db", network)
         try {
             seed(controller)
+            val archiveBefore = controller.state.value.archives.single()
+            val continuity = archiveBefore.continuity.copy(enabled = false, includeRecent = false,
+                selectedFragmentIds = emptyList(), interactionNotes = "本人填写的交流方式", nextMessage = "本人下一句话")
+            controller.saveContinuitySettings(archiveBefore.id, continuity)
             awaitCondition { network.keys.size == 2 }
             val original = task(controller)
             assertEquals(7, original.chunks.size)
@@ -96,6 +101,19 @@ class ParallelOrganizationTest {
             assertEquals("人工置顶内容", archive.entries.single { it.id == "manual" }.text)
             assertTrue(archive.entries.single { it.id == "manual" }.pinned)
             assertEquals(7, network.keys.distinct().size)
+            assertEquals(continuity, archive.continuity)
+            val generated = archive.entries.single { it.id != "manual" }
+            assertEquals(ContinuityCue.OPEN_THREAD, generated.continuityCue)
+            controller.saveEntry(archive.id, generated.copy(pinned = true))
+            val pinned = controller.state.value.archives.single().entries.single { it.id == generated.id }
+            assertFalse(pinned.edited)
+            assertEquals(ContinuityCue.OPEN_THREAD, pinned.continuityCue)
+            controller.saveEntry(archive.id, pinned.copy(text = "本人修改的正文"))
+            val edited = controller.state.value.archives.single().entries.single { it.id == generated.id }
+            assertTrue(edited.edited)
+            assertNull(edited.continuityCue)
+            assertEquals(continuity, controller.state.value.archives.single().continuity)
+            assertEquals(persisted, task(controller))
         } finally {
             controller.state.value.tasks.forEach { controller.cancelTask(it.id) }
             instrumentation.runOnMainSync { store.clear() }
@@ -194,7 +212,7 @@ class ParallelOrganizationTest {
 
         private fun completed(index: Int) = RemoteJob("remote-$index", "completed", listOf(
             ArchiveEntry("entry-$index", EntryCategory.RECENT, "片段$index",
-                sources.getValue(index).map { it.id }, kind = EntryKind.USER_FACT)))
+                sources.getValue(index).map { it.id }, kind = EntryKind.USER_FACT, continuityCue = ContinuityCue.OPEN_THREAD)))
 
         fun finish(index: Int) { results.getValue(index).complete(Unit) }
 
@@ -229,7 +247,7 @@ class ParallelOrganizationTest {
             return if (index == completeOnCancel) completed(index) else RemoteJob(remoteId, "cancelled")
         }
 
-        override suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>): List<ArchiveEntry> =
+        override suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>, promptVersion: String): List<ArchiveEntry> =
             error("BYOK must not be used by this fixture")
     }
 }

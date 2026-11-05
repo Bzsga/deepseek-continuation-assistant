@@ -46,15 +46,18 @@ class ContinuityUiSmokeTest {
                 }
             }
         }
-        compose.waitUntil(10_000) { compose.onAllNodes(hasText("查看 ", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("查看最近原话")).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("保存").assertIsDisplayed()
         screenshot("continuity-editor-top.png")
+        compose.onNodeWithText("查看最近原话").performScrollTo().performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("查看 ", substring = true)).fetchSemanticsNodes().isNotEmpty() }
         compose.onAllNodes(hasText("查看 ", substring = true)).onFirst().performScrollTo().performClick()
         compose.onNodeWithText("查看完整原话").assertIsDisplayed()
         compose.onNodeWithText("返回设置").assertIsDisplayed()
         screenshot("continuity-original-preview.png")
         compose.onNodeWithText("返回设置").performClick()
         compose.onNodeWithContentDescription("最近对话").performScrollTo().performClick()
+        compose.onNodeWithText("补充（可选）").performScrollTo().performClick()
         compose.onNodeWithText("希望延续的交流方式").performScrollTo().performTextInput("先说判断，再说明不确定的地方。")
         compose.onNodeWithText("接下来想说的话").performScrollTo().performTextInput("接着上次那一小段说吧。")
         compose.onNodeWithText("保存").assertIsDisplayed().performClick()
@@ -84,6 +87,8 @@ class ContinuityUiSmokeTest {
         compose.setContent {
             ContinuationTheme { ContinuityEditor(archive, listOf(conversation), {}, {}) }
         }
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("查看最近原话")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("查看最近原话").performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodes(hasText("查看 ", substring = true)).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("保存").assertIsDisplayed()
         compose.onAllNodes(hasText("查看 ", substring = true)).onFirst().performScrollTo().performClick()
@@ -92,6 +97,85 @@ class ContinuityUiSmokeTest {
         compose.onNodeWithText("原话末尾仍完整").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("返回设置").assertIsDisplayed()
         screenshot("continuity-long-preview-end.png")
+    }
+
+    @Test fun defaultSettingsCanSaveWithoutSelectingOrFillingAnything() {
+        val messages = listOf(
+            ChatMessage("earlier-user", "user", "先说判断，再说明不确定的地方。"),
+            ChatMessage("earlier-assistant", "assistant", "我们按这个方式继续讨论。"),
+            ChatMessage("latest-user", "user", "那么接着刚才的写作选择聊。"),
+            ChatMessage("latest-assistant", "assistant", "你最想从哪一小段开始？"),
+        )
+        val conversation = ImportedConversation("automatic", "直接续聊", branches =
+            listOf(ConversationBranch("main", "当前版本", messages)))
+        val archive = Archive("automatic-ui", "直接续聊", listOf(conversation.id), listOf(
+            ArchiveEntry("quote", EntryCategory.QUOTES, "讨论时先说判断，再说明不确定性。",
+                listOf("earlier-user", "earlier-assistant")),
+        ), generationMode = "summary", continuity = ContinuitySettings(enabled = true, recentTurns = 1),
+            sourceScopes = listOf(ArchiveSourceScope(conversation.id, "main", messages.map { it.id })))
+        val saved = AtomicReference<ContinuitySettings?>(null)
+        compose.setContent {
+            ContinuationTheme {
+                ContinuityEditor(archive, listOf(conversation), {}, { saved.set(it) })
+            }
+        }
+        compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
+        compose.onNodeWithText("保存").assertIsDisplayed().assertIsEnabled().performClick()
+        compose.waitUntil(5_000) { saved.get() != null }
+
+        val settings = saved.get()!!
+        assertEquals(archive.continuity, settings)
+        assertNull(settings.selectedFragmentIds)
+        assertEquals("", settings.interactionNotes)
+        assertEquals("", settings.nextMessage)
+        val result = ArchiveLogic.continuationExport(archive.copy(continuity = settings), listOf(conversation))
+        assertTrue(result.text.contains(messages.first().content))
+        assertTrue(result.text.contains(messages.last().content))
+    }
+
+    @Test fun collapsedCustomSettingsSurviveSaveAndRestoringAutomaticSelection() {
+        val messages = listOf(
+            ChatMessage("first-user", "user", "讨论时请先说判断，再说明不确定性。"),
+            ChatMessage("first-assistant", "assistant", "好的，我们保留这种讨论方式。"),
+            ChatMessage("last-user", "user", "继续聊刚才的写作选择。"),
+            ChatMessage("last-assistant", "assistant", "可以从最想表达的一小段开始。"),
+        )
+        val conversation = ImportedConversation("custom", "保留已有设置", branches =
+            listOf(ConversationBranch("main", "当前版本", messages)))
+        val archive = Archive("custom-ui", "保留已有设置", listOf(conversation.id), listOf(
+            ArchiveEntry("quote", EntryCategory.QUOTES, "先说判断，再说明不确定性。",
+                listOf("first-user", "first-assistant")),
+        ), generationMode = "summary", continuity = ContinuitySettings(
+            enabled = true,
+            recentTurns = 1,
+            selectedFragmentIds = emptyList(),
+            interactionNotes = "不要把暂时的想法写成已经决定的事情。",
+            nextMessage = "接着上次没说完的选择聊吧。",
+        ), sourceScopes = listOf(ArchiveSourceScope(conversation.id, "main", messages.map { it.id })))
+        val saved = AtomicReference<ContinuitySettings?>(null)
+        compose.setContent {
+            ContinuationTheme {
+                ContinuityEditor(archive, listOf(conversation), {}, { saved.set(it) })
+            }
+        }
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasText("恢复自动选择")).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
+        compose.onNodeWithText("保存").assertIsDisplayed().assertIsEnabled().performClick()
+        compose.waitUntil(5_000) { saved.get() != null }
+        assertEquals(archive.continuity, saved.get())
+        assertEquals(emptyList<String>(), saved.get()!!.selectedFragmentIds)
+
+        saved.set(null)
+        compose.onNodeWithText("恢复自动选择").performScrollTo().performClick()
+        compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
+        compose.onNodeWithText("保存").assertIsDisplayed().assertIsEnabled().performClick()
+        compose.waitUntil(5_000) { saved.get() != null }
+        assertEquals(archive.continuity.copy(selectedFragmentIds = null), saved.get())
+        assertNull(saved.get()!!.selectedFragmentIds)
+        assertEquals(archive.continuity.interactionNotes, saved.get()!!.interactionNotes)
+        assertEquals(archive.continuity.nextMessage, saved.get()!!.nextMessage)
     }
 
     private fun screenshot(name: String) {
