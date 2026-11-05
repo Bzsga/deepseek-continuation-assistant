@@ -120,8 +120,10 @@ class SummaryProtocolTest {
         assertEquals(2, chat.size)
         val user = chat[1] as JsonObject
         assertEquals("user", user["role"]?.jsonPrimitive?.content)
-        val quoted = SummaryProtocol.json.parseToJsonElement(user["content"]!!.jsonPrimitive.content) as JsonArray
+        val envelope = SummaryProtocol.json.parseToJsonElement(user["content"]!!.jsonPrimitive.content) as JsonObject
+        val quoted = envelope["source_messages"] as JsonArray
         assertEquals(injection.content, (quoted[0] as JsonObject)["content"]?.jsonPrimitive?.content)
+        assertEquals(0, (envelope["context_messages"] as JsonArray).size)
         assertFalse(root.containsKey("reasoning_content"))
     }
 

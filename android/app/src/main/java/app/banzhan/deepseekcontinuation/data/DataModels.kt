@@ -74,6 +74,7 @@ data class ReorganizationPlan(
     internal val sourceFingerprint: String = "",
     internal val settingsFingerprint: String = "",
     internal val requestId: String = java.util.UUID.randomUUID().toString(),
+    internal val promptVersion: String = "",
 )
 
 data class ReorganizationStart(val targetArchiveId: String, val taskId: String, val reusedExisting: Boolean)
@@ -118,6 +119,9 @@ internal data class TaskChunk(
     // Durable before a POST: a lost response must reuse this exact chunk and idempotency key.
     val requestStarted: Boolean = false,
     val inFlight: Boolean = false,
+    // Quoted references only; never treated as another piece of primary transcript coverage.
+    val contextMessages: List<ChatMessage> = emptyList(),
+    val resultNotice: String = "",
 )
 
 @Serializable
@@ -177,13 +181,13 @@ internal data class TaskRecord(
         if (chunk.completed || ((chunk.remoteJobId.isNotBlank() || chunk.requestStarted) && !terminal)) return@flatMap listOf(chunk)
         val retry = if (terminal) chunk.copy(remoteJobId = "", remoteStatus = "", attempt = chunk.attempt + 1,
             requestStarted = false) else chunk
-        val pieces = budgetedChunks(chunk.messages, settings, promptVersion)
+        val pieces = budgetedChunks(chunk.messages, settings, promptVersion, chunk.contextMessages)
         if (pieces.size <= 1) return@flatMap listOf(retry)
         pieces.mapIndexed { index, piece ->
             val id = hash("resume-split-v1\n${chunk.id}\n${retry.attempt}\n$index\n${piece.id}")
             val key = organizationCacheKey(settings, promptVersion, id, piece.messages,
-                if (reorganizationOfArchiveId != null) this.id else null)
-            TaskChunk(id, piece.messages, key, attempt = retry.attempt)
+                if (reorganizationOfArchiveId != null) this.id else null, piece.contextMessages)
+            TaskChunk(id, piece.messages, key, attempt = retry.attempt, contextMessages = piece.contextMessages)
         }
     }
 
@@ -202,7 +206,7 @@ internal data class StoredConflict(val existing: ArchiveEntry, val proposed: Arc
 @Serializable
 internal data class BackupDocument(
     val format: String = "deepseek-continuation-assistant",
-    val version: Int = 3,
+    val version: Int = 5,
     val createdAt: Long = System.currentTimeMillis(),
     val settings: ServiceSettings,
     val sources: List<SourceRow>,

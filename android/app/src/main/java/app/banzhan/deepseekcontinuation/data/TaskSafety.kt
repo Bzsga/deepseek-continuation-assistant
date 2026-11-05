@@ -33,7 +33,7 @@ internal fun sameCompanionIdentity(first: ServiceSettings, second: ServiceSettin
         runCatching { companionIdentityKey(first.companionUrl) == companionIdentityKey(second.companionUrl) }.getOrDefault(false)
 
 internal fun settingsWithServerBudget(settings: ServiceSettings, quota: CompanionQuota,
-    promptVersion: String = SummaryProtocol.PROMPT_VERSION): ServiceSettings {
+    promptVersion: String = organizationPromptVersion(settings, quota)): ServiceSettings {
     val context = quota.contextTokens ?: error("服务未提供分段预算，请刷新免费额度或联系管理员更新服务。")
     val output = quota.maxOutputTokens ?: error("服务未提供输出预算，请刷新免费额度或联系管理员更新服务。")
     require(quota.model.isNotBlank()) { "免费服务尚未配置模型，请稍后再试。" }
@@ -42,6 +42,11 @@ internal fun settingsWithServerBudget(settings: ServiceSettings, quota: Companio
     SummaryProtocol.chunkCharacters(captured, promptVersion)
     return captured
 }
+
+/** Older companion services keep their compatible request shape until the service is upgraded. */
+internal fun organizationPromptVersion(settings: ServiceSettings, quota: CompanionQuota? = null): String =
+    if (settings.mode == "byok" || (quota?.organizationProtocolVersion ?: 0) >= 8) SummaryProtocol.PROMPT_VERSION
+    else SummaryProtocol.RESPONSE_STYLE_PROMPT_VERSION
 
 internal fun developerSessionExpired(prefs: DeveloperPrefs): Boolean = runCatching {
     OffsetDateTime.parse(prefs.expiresAt).toInstant().toEpochMilli() <= System.currentTimeMillis()
@@ -59,7 +64,7 @@ internal fun requireTaskSlot(archiveId: String, taskId: String?, tasks: List<Tas
 }
 
 internal fun taskSourcesFit(task: TaskRecord, allowedIds: Set<String>): Boolean =
-    task.chunks.all { chunk -> chunk.messages.all { it.id in allowedIds } }
+    task.chunks.all { chunk -> (chunk.messages + chunk.contextMessages).all { it.id in allowedIds } }
 
 internal fun TaskRecord.afterDispatchFailures(failures: List<ChunkDispatchFailure>): TaskRecord {
     var updated = withoutInFlight()
@@ -110,12 +115,21 @@ internal fun mergeTaskProgress(
 
 /** Normal tasks retain their historical key; a rebuild can only reuse its own paid results. */
 internal fun organizationCacheKey(settings: ServiceSettings, promptVersion: String, chunkId: String,
-    messages: List<ChatMessage>, reorganizationTaskId: String? = null): String {
-    val ordinary = hash(appJson.encodeToString(settings.withoutSecrets()) + "\n" + promptVersion + "\n" +
-        chunkId + "\n" + appJson.encodeToString(messages))
+    messages: List<ChatMessage>, reorganizationTaskId: String? = null,
+    contextMessages: List<ChatMessage> = emptyList()): String {
+    val legacy = appJson.encodeToString(settings.withoutSecrets()) + "\n" + promptVersion + "\n" +
+        chunkId + "\n" + appJson.encodeToString(messages)
+    // Empty references retain the historical digest, including for interrupted legacy tasks.
+    val ordinary = hash(legacy + if (contextMessages.isEmpty()) "" else "\ncontext-v1\n" +
+        appJson.encodeToString(contextMessages))
     return if (reorganizationTaskId == null) ordinary else hash("reorganization-v1\n$reorganizationTaskId\n$ordinary")
 }
 
 internal fun TaskRecord.blocksReorganization(): Boolean = status in setOf("queued", "running", "paused") ||
     hasUnknownRequest() || chunks.any { !it.completed && it.remoteJobId.isNotBlank() &&
         it.remoteStatus !in setOf("failed", "uncertain", "cancelled", "expired") }
+
+internal fun organizationCompletionMessage(base: String, chunks: List<TaskChunk>): String {
+    val withoutPrimary = chunks.count { it.completed && it.resultNotice.isNotBlank() }
+    return if (withoutPrimary == 0) base else "$base；其中 $withoutPrimary 段未生成正文条目，原文仍保留，请核对后再续聊。"
+}

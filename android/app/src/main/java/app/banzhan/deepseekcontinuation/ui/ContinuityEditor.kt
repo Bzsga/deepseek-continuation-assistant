@@ -34,7 +34,7 @@ internal fun ContinuitySetupCard(
             when {
                 !archive.continuity.enabled -> "沿用已保存内容"
                 archive.generationMode == "original" -> "已保留所选原文"
-                archive.continuity.selectedFragmentIds == null -> "续聊原话自动选择"
+                archive.continuity.selectedFragmentIds == null -> "续聊线索自动准备"
                 else -> "续聊使用已保存设置"
             },
             Modifier.align(Alignment.CenterVertically),
@@ -55,6 +55,9 @@ internal fun ContinuityEditor(
     onSave: suspend (ContinuitySettings) -> Unit,
 ) {
     var enabled by rememberSaveable(archive.id) { mutableStateOf(archive.continuity.enabled) }
+    var includeResponseStyle by rememberSaveable(archive.id) {
+        mutableStateOf(archive.continuity.includeResponseStyle)
+    }
     var includeRecent by rememberSaveable(archive.id) { mutableStateOf(archive.continuity.includeRecent) }
     var selected by rememberSaveable(archive.id) {
         mutableStateOf(archive.continuity.selectedFragmentIds?.let { ArrayList(it) })
@@ -109,6 +112,7 @@ internal fun ContinuityEditor(
                                     onSave(
                                         archive.continuity.copy(
                                             enabled = enabled,
+                                            includeResponseStyle = includeResponseStyle,
                                             includeRecent = includeRecent,
                                             selectedFragmentIds = selected?.filter { it in recommendedIds },
                                             interactionNotes = interactionNotes.trim(),
@@ -130,6 +134,9 @@ internal fun ContinuityEditor(
             }
         },
     ) {
+        Text("优先衔接交流方式，保留记忆与最近对话。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -138,6 +145,27 @@ internal fun ContinuityEditor(
             Text("加入这些续聊线索", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
             Switch(enabled, { enabled = it },
                 modifier = Modifier.semantics { contentDescription = "加入这些续聊线索" }, enabled = !saving)
+        }
+        HorizontalDivider()
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("参考旧助手的回应方式", fontWeight = FontWeight.SemiBold)
+                Text("只参考有依据的回应习惯，你的明确要求优先。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(includeResponseStyle, { includeResponseStyle = it },
+                modifier = Modifier.semantics { contentDescription = "参考旧助手的回应方式" },
+                enabled = enabled && !saving)
+        }
+        if (candidates != null && candidates.responseStyleCount == 0) {
+            Text("这份档案暂无可用的回应方式线索。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         HorizontalDivider()
         Row(

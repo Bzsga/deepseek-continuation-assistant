@@ -178,6 +178,48 @@ class ContinuityUiSmokeTest {
         assertEquals(archive.continuity.nextMessage, saved.get()!!.nextMessage)
     }
 
+    @Test fun disabledResponseStyleAndNotesRemainUntilExplicitlyChanged() {
+        val archive = Archive(
+            id = "response-style-ui", title = "保留回应方式设置", conversationIds = emptyList(), entries = emptyList(),
+            background = "这是保留已有设置的本机合成测试。",
+            continuity = ContinuitySettings(
+                enabled = false,
+                includeResponseStyle = false,
+                interactionNotes = "先说判断，不要替我决定。",
+                nextMessage = "接着上次那个选择聊。",
+            ),
+        )
+        val saved = AtomicReference<ContinuitySettings?>(null)
+        compose.setContent {
+            ContinuationTheme {
+                ContinuityEditor(archive, emptyList(), {}, { saved.set(it) })
+            }
+        }
+        compose.onNodeWithContentDescription("加入这些续聊线索").assertIsOff()
+        compose.onNodeWithContentDescription("参考旧助手的回应方式")
+            .performScrollTo().assertIsOff().assertIsNotEnabled()
+        compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
+        compose.onNodeWithText("保存").assertIsDisplayed().assertIsEnabled().performClick()
+        compose.waitUntil(5_000) { saved.get() != null }
+        assertEquals(archive.continuity, saved.get())
+
+        saved.set(null)
+        compose.onNodeWithContentDescription("加入这些续聊线索")
+            .performScrollTo().performClick().assertIsOn()
+        compose.onNodeWithContentDescription("参考旧助手的回应方式")
+            .performScrollTo().assertIsEnabled().performClick().assertIsOn()
+        compose.onNodeWithText("保存").assertIsDisplayed()
+        compose.onNodeWithText("补充（可选）").performScrollTo().performClick()
+        val updatedNotes = "先直接回应问题，再说明你判断的依据。"
+        compose.onNodeWithText("希望延续的交流方式").performScrollTo().performTextReplacement(updatedNotes)
+        compose.onNodeWithText("保存").assertIsDisplayed().assertIsEnabled().performClick()
+        compose.waitUntil(5_000) { saved.get() != null }
+        assertEquals(
+            archive.continuity.copy(enabled = true, includeResponseStyle = true, interactionNotes = updatedNotes),
+            saved.get(),
+        )
+    }
+
     private fun screenshot(name: String) {
         compose.waitForIdle()
         val instrumentation = InstrumentationRegistry.getInstrumentation()

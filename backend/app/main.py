@@ -10,7 +10,8 @@ from .admin_access import build_admin_router, initialize_admin
 from .feedback import FeedbackStore, MAX_FEEDBACK_BODY_BYTES, build_feedback_router
 from .diagnostics import DiagnosticsStore, MAX_DIAGNOSTIC_BODY_BYTES, build_diagnostics_router
 from .runner import Runner, ServiceLease
-from .schemas import JobRequest, RedeemRequest, MAX_SOURCE_CHARACTERS, MAX_SOURCE_MESSAGES
+from .schemas import (JobRequest, RedeemRequest, MAX_SOURCE_CHARACTERS, MAX_SOURCE_MESSAGES,
+                      MAX_FILTER_CHARACTERS, MAX_FILTER_MESSAGES)
 from .store import ServiceError, Store
 
 
@@ -106,22 +107,31 @@ def create_app(settings=None):
         detail = "提交的消息格式不正确，请检查消息编号、说话方和正文。"
         for issue in error.errors():
             location = issue.get("loc", ())
-            if len(location) >= 3 and location[:2] == ("body", "messages") and isinstance(location[2], int):
+            if (len(location) >= 3 and location[0] == "body" and location[1] in {"messages", "context_messages"}
+                    and isinstance(location[2], int)):
                 number = location[2] + 1
                 field = location[3] if len(location) > 3 else ""
+                section = "前段参考的" if location[1] == "context_messages" else ""
                 if field == "content":
-                    detail = f"第 {number} 条消息正文格式不正确，单条上限为 {MAX_SOURCE_CHARACTERS} 字符。"
+                    detail = f"{section}第 {number} 条消息正文格式不正确，单条上限为 {MAX_SOURCE_CHARACTERS} 字符。"
                 elif field == "role":
-                    detail = f"第 {number} 条消息的说话方格式不受支持，请核对原文中的角色。"
+                    detail = f"{section}第 {number} 条消息的说话方格式不受支持，请核对原文中的角色。"
                 elif field == "id":
-                    detail = f"第 {number} 条消息缺少有效来源编号，编号上限为 512 字符。"
+                    detail = f"{section}第 {number} 条消息缺少有效来源编号，编号上限为 512 字符。"
                 break
             if location == ("body", "messages"):
                 detail = f"单次消息数量须为 1 到 {MAX_SOURCE_MESSAGES} 条，请缩小整理范围。"
             elif location == ("body", "idempotency_key"):
                 detail = "整理任务编号格式不正确，请重新准备此任务。"
+            elif location == ("body", "operation"):
+                detail = "此任务类型不受支持，请更新应用后重新准备任务。"
             elif issue.get("type") == "value_error":
-                detail = f"消息正文或来源关系未通过校验，单次正文上限为 {MAX_SOURCE_CHARACTERS} 字符。"
+                source = issue.get("input")
+                if isinstance(source, dict) and source.get("operation") == "political_filter":
+                    detail = (f"筛查片段格式不正确，每次最多 {MAX_FILTER_MESSAGES} 段，"
+                              f"正文合计不超过 {MAX_FILTER_CHARACTERS} 字符，且不附加前段参考。")
+                else:
+                    detail = f"消息正文或来源关系未通过校验，单次正文上限为 {MAX_SOURCE_CHARACTERS} 字符。"
         return JSONResponse({"detail": detail}, status_code=422)
 
     def owner(authorization: str | None = Header(default=None)):

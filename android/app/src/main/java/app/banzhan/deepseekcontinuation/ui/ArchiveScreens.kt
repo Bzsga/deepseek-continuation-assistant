@@ -52,6 +52,7 @@ internal fun ArchiveScreen(
     onDeleted: () -> Unit,
     onReorganize: () -> Unit = {},
     onOpenRecord: (String) -> Unit = {},
+    onPoliticalExport: () -> Unit = {},
 ) {
     var editEntry by remember { mutableStateOf<ArchiveEntry?>(null) }
     var editBackground by remember { mutableStateOf(false) }
@@ -82,6 +83,10 @@ internal fun ArchiveScreen(
                     Icon(Icons.Outlined.IosShare, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("导出续聊")
+                }
+                if (archive.generationMode == "summary" &&
+                    (entries.any { it.text.isNotBlank() } || archive.background.isNotBlank())) {
+                    OutlinedButton(onClick = onPoliticalExport) { Text("生成温和版") }
                 }
                 OutlinedButton(onClick = { chooseConversation = true }) {
                     Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))

@@ -58,6 +58,7 @@ fun ContinuationApp(
     onIncomingImportConsumed: (String) -> Unit = {},
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
+    val politicalState by controller.politicalExport.state.collectAsStateWithLifecycle()
     val updates: AppUpdateViewModel = viewModel()
     val updateState by updates.state.collectAsStateWithLifecycle()
     val currentIncomingImport by rememberUpdatedState(incomingImport)
@@ -80,6 +81,7 @@ fun ContinuationApp(
     var pendingDocumentPath by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingDocumentMessage by rememberSaveable { mutableStateOf("") }
     var exportArchive by remember { mutableStateOf<Archive?>(null) }
+    var politicalArchiveId by rememberSaveable { mutableStateOf<String?>(null) }
     var aiRequest by remember { mutableStateOf<AiRequest?>(null) }
     var reorganizationPlan by remember { mutableStateOf<ReorganizationPlan?>(null) }
     var reorganizationSourceId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -359,17 +361,20 @@ fun ContinuationApp(
     }
     val importingSharedFile = incomingImport?.status == IncomingImportStatus.IMPORTING
     val busy = state.busy || submitting || reorganizationLoading || importingSharedFile || installPreparing
-    val existingModal = aiRequest != null || exportArchive != null || restoreConfirmation || reorganizationPlan != null || reorganizationLoading
+    val politicalRunning = politicalState.task?.status in setOf("queued", "running")
+    val existingModal = aiRequest != null || exportArchive != null || politicalArchiveId != null || restoreConfirmation || reorganizationPlan != null || reorganizationLoading
     val incomingBlocked =
-        busy || existingModal || state.tasks.any { it.status in setOf("queued", "running") }
+        busy || existingModal || politicalRunning || state.tasks.any { it.status in setOf("queued", "running") }
     fun installationBlocker(): String? {
         val current = controller.state.value
         return when {
+            controller.politicalExport.state.value.task?.status in setOf("queued", "running") -> "温和版检查正在进行，请完成后再安装更新。"
             current.tasks.any { it.status in setOf("queued", "running") } -> "整理正在进行，请完成后再安装更新。"
             currentIncomingImport != null -> "请先处理收到的聊天文件，再安装更新。"
             current.busy || submitting || reorganizationLoading -> "当前操作完成后可安装更新。"
             aiRequest != null ||
                 exportArchive != null ||
+                politicalArchiveId != null ||
                 reorganizationPlan != null ||
                 restoreConfirmation ||
                 getRecordsVisible -> "请先完成当前页面操作，再安装更新。"
@@ -734,6 +739,7 @@ fun ContinuationApp(
                                         busy = busy,
                                         onReorganize = { requestReorganization(archive.id) },
                                         onOpenRecord = { openRecord(it) },
+                                        onPoliticalExport = { politicalArchiveId = archive.id },
                                     )
                             }
                             "paste" ->
@@ -821,6 +827,7 @@ fun ContinuationApp(
                                         { route = "archives" },
                                         onReorganize = { requestReorganization(archive.id) },
                                         onOpenRecord = { openRecord(it) },
+                                        onPoliticalExport = { politicalArchiveId = archive.id },
                                     )
                             }
                             "settings",
@@ -905,6 +912,26 @@ fun ContinuationApp(
                     }
                 },
             )
+        politicalArchiveId?.let { id ->
+            val archive = state.archives.firstOrNull { it.id == id }
+            if (archive != null) PoliticalExportDialog(
+                archive = archive,
+                conversations = state.conversations,
+                controller = controller,
+                onDismiss = { politicalArchiveId = null },
+                onCopy = { text -> run {
+                    require(text.toByteArray(Charsets.UTF_8).size <= 60 * 1024) { "内容较长，请保存为温和版文件。" }
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(ClipData.newPlainText("续聊温和版", text))
+                    snackbars.showSnackbar("温和版已复制，原档案未改动。")
+                } },
+                onSave = { text -> run {
+                    val checkedArchive = state.archives.firstOrNull { it.id == politicalState.task?.archiveId }
+                    stageDocument(text, "温和版已保存，原档案未改动。")
+                    saveContinuation.launch(safeFileName(checkedArchive?.title ?: archive.title) + "-温和版.txt")
+                } },
+            ) else LaunchedEffect(id) { politicalArchiveId = null }
+        }
         exportArchive?.let { snapshot ->
             val archive = state.archives.firstOrNull { it.id == snapshot.id } ?: return@let
             ExportDialog(

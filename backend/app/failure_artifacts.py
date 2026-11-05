@@ -24,7 +24,7 @@ MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 DEFAULT_TTL_SECONDS = 86400
 MAX_TTL_SECONDS = 7 * DEFAULT_TTL_SECONDS
 SNAPSHOT_FIELDS = {"model", "mock_mode", "input_price", "output_price", "input_bound",
-                   "output_bound", "protocol_version", "access_mode"}
+                   "output_bound", "protocol_version", "access_mode", "operation"}
 REQUEST_FIELDS = {"model", "messages", "max_tokens", "stream", "response_format", "thinking",
                   "reasoning_effort", "temperature", "top_p", "frequency_penalty",
                   "presence_penalty", "stop", "seed"}
@@ -148,7 +148,7 @@ class ProviderTrace:
             "network_events": {name: elapsed for name, elapsed in self.network_events.items()
                                if name in NETWORK_EVENTS and type(elapsed) is int and 0 <= elapsed <= 1_000_000_000},
         }
-        if type(self.prompt_version) is int and self.prompt_version in {2, 3, 4, 5}:
+        if type(self.prompt_version) is int and self.prompt_version in {1, 2, 3, 4, 5, 6, 7, 8}:
             result["prompt_version"] = self.prompt_version
         return result
 
@@ -316,7 +316,8 @@ class ArtifactStore:
             if database is not None:
                 database.close()
 
-    def save(self, job_id, trace, snapshot, messages, status, error_message, *, secrets=(), ttl_seconds=DEFAULT_TTL_SECONDS):
+    def save(self, job_id, trace, snapshot, messages, status, error_message, *, secrets=(), ttl_seconds=DEFAULT_TTL_SECONDS,
+             context_messages=()):
         if (not isinstance(job_id, str) or not job_id or len(job_id) > 200
                 or status not in {"failed", "uncertain"}
                 or type(ttl_seconds) not in (int, float) or not math.isfinite(ttl_seconds)
@@ -342,10 +343,11 @@ class ArtifactStore:
                     raise ArtifactError("capture_too_large")
                 # Import lazily: provider imports ProviderTrace from this module.
                 from .provider import source_aliases
-                if not isinstance(messages, list) or any(not isinstance(item, dict)
-                        or set(item) != {"id", "role", "content"} for item in messages):
+                if (not isinstance(messages, list) or not isinstance(context_messages, (list, tuple))
+                        or any(not isinstance(item, dict) or set(item) != {"id", "role", "content"}
+                               for item in messages + list(context_messages))):
                     raise ArtifactError("capture_invalid_sources")
-                _, source_map = source_aliases(messages)
+                _, source_map = source_aliases(messages + list(context_messages))
                 raw = bytes(trace.response_body)
                 redactor = _Redactor(secrets)
                 body = redactor.body(raw)
@@ -361,6 +363,7 @@ class ArtifactStore:
                     "error_code": code, "error_message": fixed_message,
                     "request": trace.request, "snapshot": safe_snapshot, "technical": trace.diagnostics(),
                     "messages": messages, "source_id_map": source_map,
+                    **({"context_messages": list(context_messages)} if context_messages else {}),
                 })
                 redacted = redactor.changed or response_redacted
                 payload.update({"response": {
@@ -379,7 +382,8 @@ class ArtifactStore:
                     "truncated": trace.response_truncated, "body_read_complete": trace.body_read_complete,
                     "complete_original": payload["complete_original"], "response_bytes": len(body),
                     "artifact_bytes": len(encoded), "request_present": trace.request is not None,
-                    "source_count": len(messages),
+                    "source_count": len(messages) + len(context_messages),
+                    **({"context_source_count": len(context_messages)} if context_messages else {}),
                 }
             except ArtifactError:
                 raise
@@ -425,7 +429,7 @@ class ArtifactStore:
 
 def replay_artifact(payload):
     """Parse saved bytes using current pure validators; no transport or billing."""
-    from .provider import (ProtocolError, json_error_diagnostics, normalize_entries,
+    from .provider import (ProtocolError, json_error_diagnostics, normalize_entries, normalize_political_filter_entries,
                            response_diagnostics)
     response = payload.get("response", {})
     result = {"ok": False, "stage": "envelope", "envelope_valid": False, "entries_count": 0,
@@ -470,8 +474,17 @@ def replay_artifact(payload):
             raise ProtocolError("content_filter")
         result.update(envelope_valid=True, stage="content")
         warnings = set()
-        entries = normalize_entries(message["content"], payload["messages"], warnings=warnings,
-                                    diagnostic=result["diagnostic"])
+        operation = payload.get("snapshot", {}).get("operation", "organize")
+        if operation == "political_filter":
+            entries = normalize_political_filter_entries(message["content"], payload["messages"], warnings=warnings,
+                                                         diagnostic=result["diagnostic"])
+        elif operation == "organize":
+            entries = normalize_entries(message["content"], payload["messages"], warnings=warnings,
+                                        diagnostic=result["diagnostic"],
+                                        **({"context_messages": payload["context_messages"]}
+                                           if payload.get("context_messages") else {}))
+        else:
+            raise ProtocolError("content_shape")
         result.update(ok=True, stage="complete", entries_count=len(entries), warnings=sorted(warnings))
     except ProtocolError as error:
         result["error_code"] = error.code

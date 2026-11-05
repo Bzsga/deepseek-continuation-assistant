@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from .config import Settings, money
-from .provider import prices_configured, snapshot_for
+from .provider import CURRENT_PROTOCOL_VERSION, prices_configured, snapshot_for
 from .schemas import RedeemRequest
 
 
@@ -308,6 +308,8 @@ class Store:
                 "model": settings.display_model, "mock_mode": settings.mock_mode,
                 "access_mode": access_mode, "cost_known": settings.cost_known,
                 "context_tokens": settings.context_tokens, "max_output_tokens": settings.max_output_tokens,
+                "organization_protocol_version": CURRENT_PROTOCOL_VERSION,
+                "political_filter_supported": True,
                 "message": message, "remaining_micros": max(0, remaining), "per_job_micros": per_job,
                 **daily}
 
@@ -318,7 +320,12 @@ class Store:
 
     def create_job(self, owner_id, request):
         messages = [message.model_dump() for message in request.messages]
-        payload = json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        context_messages = [message.model_dump() for message in request.context_messages]
+        # Keep legacy empty-context bytes and idempotency fingerprints unchanged.
+        content = {"messages": messages, "context_messages": context_messages} if context_messages else messages
+        if request.operation == "political_filter":
+            content = {"operation": request.operation, "messages": messages}
+        payload = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         fingerprint = digest(payload)
         with self.connection(write=True) as db:
             previous = db.execute("SELECT * FROM jobs WHERE owner_id=? AND idempotency_key=?", (owner_id, request.idempotency_key)).fetchone()
@@ -332,7 +339,10 @@ class Store:
                 raise ServiceError(503, quota["message"])
             if quota["daily_remaining"] == 0 or quota["user_daily_remaining"] == 0:
                 raise ServiceError(429, "今日整理次数不足，排队任务也占用次数，请在北京时间次日零点后重试")
-            snapshot, reserve = snapshot_for(settings, messages)
+            context_args = {"context_messages": context_messages} if context_messages else {}
+            if request.operation != "organize":
+                context_args["operation"] = request.operation
+            snapshot, reserve = snapshot_for(settings, messages, **context_args)
             if not settings.cost_known:
                 reserve = 0
             snapshot.update({"configuration_fingerprint": configuration_fingerprint(settings),

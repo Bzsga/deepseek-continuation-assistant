@@ -57,6 +57,7 @@ class AppController internal constructor(application: Application, databaseName:
         .addMigrations(AppDatabase.MIGRATION_1_2).build()
     private val dao = database.records()
     private val credentials = SecureCredentials(application)
+    val politicalExport = PoliticalExportManager(application, credentials, viewModelScope)
     private val preferences = application.getSharedPreferences("service_settings", Context.MODE_PRIVATE)
     private val mutex = Mutex()
     private val sessionMutex = Mutex()
@@ -281,11 +282,24 @@ class AppController internal constructor(application: Application, databaseName:
 
     fun estimateForCurrentService(messages: List<ChatMessage>): OrganizationEstimate {
         val current = state.value
+        val promptVersion = organizationPromptVersion(current.settings, current.quota)
         val settings = if (current.settings.mode == "companion") {
             val quota = current.quota ?: error(current.quotaError ?: "正在获取免费服务的分段预算，请稍后。")
-            settingsWithServerBudget(current.settings, quota)
+            settingsWithServerBudget(current.settings, quota, promptVersion)
         } else current.settings
-        return estimateOrganization(settings, messages)
+        return estimateOrganization(settings, messages, promptVersion)
+    }
+
+    /** Preparation only reads service availability and estimates the explicit export-copy check. */
+    suspend fun preparePoliticalExport(archiveId: String, text: String): PoliticalExportPlan = operation {
+        mutex.withLock {
+            requireWritable()
+            require(archiveId !in deletingArchives && dao.archive(archiveId) != null) { "档案已不存在或正在删除" }
+        }
+        val snapshot = if (state.value.settings.mode == "companion") ensureCompanionIdentity() else state.value.settings
+        val quota = if (snapshot.mode == "companion") refreshQuotaState() else null
+        require(state.value.settings == snapshot) { "服务设置已变化，请重新查看预计次数。" }
+        politicalExport.prepare(archiveId, text, snapshot, quota)
     }
 
     private suspend fun ensureCompanionIdentity(requireFreeMode: Boolean = true, diagnosticsOnly: Boolean = false): ServiceSettings = sessionMutex.withLock {
@@ -784,6 +798,7 @@ class AppController internal constructor(application: Application, databaseName:
         try {
             taskIds.forEach { cancelTask(it) }
             jobs.values.toList().forEach { it.cancelAndJoin() }
+            val politicalClearNotice = politicalExport.clearLocalData()
             mutex.withLock {
                 conversationCacheValid = false
                 database.withTransaction {
@@ -804,7 +819,8 @@ class AppController internal constructor(application: Application, databaseName:
                 }
                 refresh(reloadConversations = true)
                 mutableState.update { it.copy(lastImportedConversationIds = emptyList()) }
-                notice("本地会话、档案、原始文件、版本、整理进度与粘贴草稿已清除，服务设置已保留")
+                notice("本地会话、档案、原始文件、版本、整理进度、检查副本与粘贴草稿已清除，服务设置已保留" +
+                    politicalClearNotice?.let { "\n$it" }.orEmpty())
             }
         } finally {
             withContext(NonCancellable) { mutex.withLock { clearingData = false } }
@@ -843,12 +859,14 @@ class AppController internal constructor(application: Application, databaseName:
             val quota = if (snapshot.mode == "companion") refreshQuotaState() else null
             require(state.value.settings == snapshot) { "服务设置已改变，请重新检查后开始。" }
             quota?.organizationBlocker()?.let { error(it) }
-            val settings = validateOrganizationConfiguration(if (quota != null) settingsWithServerBudget(snapshot, quota) else snapshot)
-            val estimates = resolved.messageGroups.map { estimateOrganization(settings, it) }
+            val promptVersion = organizationPromptVersion(snapshot, quota)
+            val settings = validateOrganizationConfiguration(if (quota != null) settingsWithServerBudget(snapshot, quota, promptVersion) else snapshot,
+                promptVersion)
+            val estimates = resolved.messageGroups.map { estimateOrganization(settings, it, promptVersion) }
             base.copy(estimate = OrganizationEstimate(estimates.sumOf { it.chunks }, estimates.sumOf { it.inputTokens },
                 estimates.sumOf { it.outputTokens }, if (estimates.all { it.estimatedCost != null })
                     estimates.sumOf { it.estimatedCost ?: 0.0 } else null),
-                settingsFingerprint = hash(appJson.encodeToString(settings)))
+                settingsFingerprint = hash(appJson.encodeToString(settings)), promptVersion = promptVersion)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -885,25 +903,28 @@ class AppController internal constructor(application: Application, databaseName:
             }
             require(state.value.settings == snapshot) { "服务设置已改变，请重新检查后开始。" }
             quota?.organizationBlocker()?.let { error(it) }
-            val settings = validateOrganizationConfiguration(if (quota != null) settingsWithServerBudget(snapshot, quota) else snapshot)
-            require(hash(appJson.encodeToString(settings)) == plan.settingsFingerprint) {
+            val promptVersion = organizationPromptVersion(snapshot, quota)
+            val settings = validateOrganizationConfiguration(if (quota != null) settingsWithServerBudget(snapshot, quota, promptVersion) else snapshot,
+                promptVersion)
+            require(hash(appJson.encodeToString(settings)) == plan.settingsFingerprint && promptVersion == plan.promptVersion) {
                 "服务或分段预算已变化，请重新查看费用后确认。"
             }
             val targetId = UUID.randomUUID().toString()
             val taskId = plan.requestId
             val records = resolved.messageGroups.flatMapIndexed { index, messages ->
                 val scope = resolved.sourceScopes[index]
-                budgetedChunks(messages, settings).map { chunk ->
+                budgetedChunks(messages, settings, promptVersion).map { chunk ->
                     val chunkId = hash("reorganization-scope-v1\n${scope.conversationId}\n${scope.branchId}\n${chunk.id}")
                     TaskChunk(chunkId, chunk.messages,
-                        organizationCacheKey(settings, SummaryProtocol.PROMPT_VERSION, chunkId, chunk.messages, taskId))
+                        organizationCacheKey(settings, promptVersion, chunkId, chunk.messages, taskId, chunk.contextMessages),
+                        contextMessages = chunk.contextMessages)
                 }
             }
             require(records.isNotEmpty()) { "没有可重新整理的文字。" }
             val target = ReorganizationLogic.rebuildArchive(original, targetId)
                 .copy(sourceScopes = resolved.sourceScopes)
             val task = TaskRecord(taskId, targetId, target.title, settings.withoutSecrets(), "task:$taskId", records,
-                message = estimateCost(settings, records), promptVersion = SummaryProtocol.PROMPT_VERSION,
+                message = estimateCost(settings, records, promptVersion), promptVersion = promptVersion,
                 reorganizationOfArchiveId = original.id)
             credentials.put(task.secretRef, if (settings.mode == "byok") settings.apiKey else settings.trialToken)
             DiagnosticLog.record("task", "prepare", mapOf("chunk_count" to records.size.toLong()))
@@ -937,6 +958,7 @@ class AppController internal constructor(application: Application, databaseName:
     }
 
     suspend fun organize(archiveId: String, conversationId: String, branchId: String, selectedIds: Set<String>) = operation {
+        val previewQuota = state.value.quota
         val settingsSnapshot = if (state.value.settings.mode == "companion") ensureCompanionIdentity() else state.value.settings
         val freeQuota = if (settingsSnapshot.mode == "companion") refreshQuotaState() else null
         val taskId = mutex.withLock {
@@ -952,18 +974,26 @@ class AppController internal constructor(application: Application, databaseName:
             require(messages.isNotEmpty()) { "请选择要整理的消息" }
             require(state.value.settings == settingsSnapshot) { "服务设置已改变，请重新检查后开始。" }
             if (freeQuota != null) require(freeQuota.organizationBlocker() == null) { freeQuota.organizationBlocker().orEmpty() }
-            val settings = validateOrganizationConfiguration(if (freeQuota != null) settingsWithServerBudget(settingsSnapshot, freeQuota) else settingsSnapshot)
+            val promptVersion = organizationPromptVersion(settingsSnapshot, freeQuota)
+            if (freeQuota != null && previewQuota != null) require(
+                promptVersion == organizationPromptVersion(settingsSnapshot, previewQuota) &&
+                    freeQuota.model == previewQuota.model && freeQuota.contextTokens == previewQuota.contextTokens &&
+                    freeQuota.maxOutputTokens == previewQuota.maxOutputTokens) {
+                "免费服务的整理方式或预算已更新，请查看新的预计次数后再开始。"
+            }
+            val settings = validateOrganizationConfiguration(if (freeQuota != null) settingsWithServerBudget(settingsSnapshot, freeQuota, promptVersion) else settingsSnapshot,
+                promptVersion)
             val secret = if (settings.mode == "byok") settings.apiKey else settings.trialToken
-            val chunks = budgetedChunks(messages, settings)
+            val chunks = budgetedChunks(messages, settings, promptVersion)
             require(chunks.isNotEmpty()) { "没有可整理的文字消息" }
             val id = UUID.randomUUID().toString()
             credentials.put("task:$id", secret)
             val records = chunks.map { chunk ->
-                val key = organizationCacheKey(settings, SummaryProtocol.PROMPT_VERSION, chunk.id, chunk.messages)
-                TaskChunk(chunk.id, chunk.messages, key)
+                val key = organizationCacheKey(settings, promptVersion, chunk.id, chunk.messages, contextMessages = chunk.contextMessages)
+                TaskChunk(chunk.id, chunk.messages, key, contextMessages = chunk.contextMessages)
             }
             val task = TaskRecord(id, archiveId, archive.title, settings.withoutSecrets(), "task:$id", records,
-                message = estimateCost(settings, records), promptVersion = SummaryProtocol.PROMPT_VERSION)
+                message = estimateCost(settings, records, promptVersion), promptVersion = promptVersion)
             DiagnosticLog.record("task", "prepare", mapOf("chunk_count" to records.size.toLong()))
             database.withTransaction {
                 val scoped = withSelectedSourceScope(archive, source, branchId, selectedIds)
@@ -1059,7 +1089,7 @@ class AppController internal constructor(application: Application, databaseName:
                             }
                         }
                         if (remote.status == "completed") {
-                            persistChunk(taskId, chunk, SummaryProtocol.validateEntries(remote.entries, chunk.messages))
+                            persistChunk(taskId, chunk, SummaryProtocol.validateEntries(remote.entries, chunk.messages, chunk.contextMessages))
                         }
                     }
                 } catch (cancelled: CancellationException) {
@@ -1262,7 +1292,8 @@ class AppController internal constructor(application: Application, databaseName:
                         "已保留你的修订/删除，新建议可在详细内容的核对冲突查看"
                     else if (hasContent) "整理完成，人工修改和置顶内容已保留"
                     else "没有提取到可续聊的内容，可改用原文模式。"
-                    saveTask(task.withoutInFlight().copy(status = "completed", uncertain = false, message = message))
+                    saveTask(task.withoutInFlight().copy(status = "completed", uncertain = false,
+                        message = organizationCompletionMessage(message, task.chunks)))
                 }
                 refresh()
                 scheduleQuotaRefresh(task)
@@ -1313,17 +1344,17 @@ class AppController internal constructor(application: Application, databaseName:
         if (chunk.completed) return
         val cached = dao.cache(chunk.cacheKey)
         if (cached != null) {
-            val entries = SummaryProtocol.validateEntries(appJson.decodeFromString<List<ArchiveEntry>>(cached.payload), chunk.messages)
+            val entries = SummaryProtocol.validateEntries(appJson.decodeFromString<List<ArchiveEntry>>(cached.payload), chunk.messages, chunk.contextMessages)
             withContext(NonCancellable) { persistChunk(taskId, chunk, entries) }
             return
         }
         val settings = withTaskSecret(task)
-        SummaryProtocol.validateForRequest(settings, chunk.messages, task.promptVersion)
+        SummaryProtocol.validateForRequest(settings, chunk.messages, task.promptVersion, chunk.contextMessages)
         val entries = if (settings.mode == "byok") {
             if (!recordChunkStart(taskId, chunk, maySubmit)) return
-            organizationNetwork.summarize(settings, chunk.messages, task.promptVersion)
+            organizationNetwork.summarize(settings, chunk.messages, task.promptVersion, chunk.contextMessages)
         } else runCompanionChunk(task, chunk, settings, maySubmit) ?: return
-        val validated = SummaryProtocol.validateEntries(entries, chunk.messages)
+        val validated = SummaryProtocol.validateEntries(entries, chunk.messages, chunk.contextMessages)
         withContext(NonCancellable) { persistChunk(taskId, chunk, validated) }
         scheduleQuotaRefresh(task)
     }
@@ -1353,6 +1384,9 @@ class AppController internal constructor(application: Application, databaseName:
             if (!chunk.requestStarted) {
                 val quota = organizationNetwork.quota(settings)
                 quota.organizationBlocker()?.let { throw SummaryFailure(it, ambiguous = false) }
+                if (task.promptVersion == SummaryProtocol.PROMPT_VERSION && (quota.organizationProtocolVersion ?: 0) < 8) {
+                    throw SummaryFailure("免费服务暂不支持本次长文整理，已保留进度。请待服务更新后继续。", ambiguous = false)
+                }
                 val currentBudget = settingsWithServerBudget(settings, quota, task.promptVersion)
                 if (currentBudget.model != settings.model || currentBudget.contextTokens != settings.contextTokens ||
                     currentBudget.maxOutputTokens != settings.maxOutputTokens) {
@@ -1360,7 +1394,7 @@ class AppController internal constructor(application: Application, databaseName:
                 }
             }
             if (!recordChunkStart(task.id, chunk, maySubmit)) return null
-            val submitted = organizationNetwork.submit(settings, chunk.messages, "${task.id}:${chunk.id}:${chunk.attempt}")
+            val submitted = organizationNetwork.submit(settings, chunk.messages, "${task.id}:${chunk.id}:${chunk.attempt}", chunk.contextMessages)
             if (submitted.status !in setOf("queued", "running", "completed")) maySubmit.stop()
             remoteId = submitted.id
             withContext(NonCancellable) {
@@ -1389,7 +1423,7 @@ class AppController internal constructor(application: Application, databaseName:
                 }
             }
             when (remote.status) {
-                "completed" -> return SummaryProtocol.validateEntries(remote.entries, chunk.messages)
+                "completed" -> return SummaryProtocol.validateEntries(remote.entries, chunk.messages, chunk.contextMessages)
                 "uncertain" -> throw SummaryFailure(remote.message.ifBlank { "远端请求结果不确定，请检查已使用次数和任务状态" }, true)
                 "failed", "cancelled" -> throw SummaryFailure(remote.message.ifBlank { "远端任务已${if (remote.status == "failed") "失败" else "取消"}，已保留进度" }, false)
                 "queued", "running" -> Unit
@@ -1412,7 +1446,7 @@ class AppController internal constructor(application: Application, databaseName:
                 require(taskSourcesFit(task, sourceIds(archive))) { "档案来源已变化，分块结果已保存，请新建整理任务" }
                 val parts = task.chunks.filter { it.completed || it.id == chunk.id }.associate { completed ->
                     val cached = dao.cache(completed.cacheKey) ?: error("已完成分块缓存缺失，请恢复完整备份")
-                    completed.id to SummaryProtocol.validateEntries(appJson.decodeFromString<List<ArchiveEntry>>(cached.payload), completed.messages)
+                    completed.id to SummaryProtocol.validateEntries(appJson.decodeFromString<List<ArchiveEntry>>(cached.payload), completed.messages, completed.contextMessages)
                 }
                 val previousProgress = aggregateChunkEntries(task.chunks.filter { it.completed }.map { parts.getValue(it.id) })
                 val currentProgress = aggregateChunkEntries(task.chunks.filter { it.completed || it.id == chunk.id }.map { parts.getValue(it.id) })
@@ -1421,9 +1455,12 @@ class AppController internal constructor(application: Application, databaseName:
                 saveArchive(archive.copy(entries = merged.entries,
                     generationMode = if (archive.generationMode == "original" && entries.isNotEmpty()) "legacy" else archive.generationMode))
                 saveConflicts(archive.id, merged.conflicts)
-                val updated = task.updateChunk(chunk.id) { it.copy(completed = true, inFlight = false) }
+                val resultNotice = if (chunk.contextMessages.isNotEmpty() && entries.isEmpty())
+                    "本段未生成正文条目，原文仍保留" else ""
+                val updated = task.updateChunk(chunk.id) { it.copy(completed = true, inFlight = false, resultNotice = resultNotice) }
                 saveTask(updated.copy(message = if (task.status == "running")
-                    "已保存 ${updated.chunks.count { it.completed }}/${task.chunks.size} 个分块" else task.message))
+                    "已保存 ${updated.chunks.count { it.completed }}/${task.chunks.size} 个分块" +
+                        if (resultNotice.isNotEmpty()) "；$resultNotice" else "" else task.message))
             }
             refresh()
         }
@@ -1573,44 +1610,76 @@ internal fun validateSettings(settings: ServiceSettings): ServiceSettings {
         model = settings.model.trim(), apiKey = settings.apiKey.trim(), trialToken = settings.trialToken.trim())
 }
 
-internal fun validateOrganizationConfiguration(settings: ServiceSettings): ServiceSettings {
+internal fun validateOrganizationConfiguration(settings: ServiceSettings,
+    promptVersion: String = SummaryProtocol.PROMPT_VERSION): ServiceSettings {
     val cleaned = validateSettings(settings)
     val secret = if (cleaned.mode == "byok") cleaned.apiKey else cleaned.trialToken
     require(secret.isNotBlank()) { if (cleaned.mode == "byok") "请先在服务设置中填写 API Key。" else "免费身份尚未建立，请刷新免费额度后再试。" }
     require(secret.length <= 8192 && secret.all { it.code in 33..126 }) { "密钥或令牌格式无效，请在服务设置中重新填写。" }
-    SummaryProtocol.chunkCharacters(cleaned)
+    SummaryProtocol.chunkCharacters(cleaned, promptVersion)
     return cleaned
 }
 
-private fun estimateCost(settings: ServiceSettings, chunks: List<TaskChunk>): String {
+private fun estimateCost(settings: ServiceSettings, chunks: List<TaskChunk>, promptVersion: String): String {
     val inputPrice = settings.inputPricePerMillion
     val outputPrice = settings.outputPricePerMillion
     if (settings.mode == "companion") return "共${chunks.size}个分块，每个新请求使用1次免费额度，服务端会先检查当日余量"
     if (inputPrice == null || outputPrice == null) return "共${chunks.size}个分块，费用由原服务商计费。填写单价后可估算。"
-    val input = chunks.sumOf { SummaryProtocol.estimatedInputTokens(it.messages) }
+    val input = chunks.sumOf { SummaryProtocol.estimatedInputTokens(it.messages, promptVersion, it.contextMessages) }
     val output = chunks.size * settings.maxOutputTokens
     val estimated = (input * inputPrice + output * outputPrice) / 1_000_000.0
     return "共${chunks.size}个分块，按填写单价保守估算约 ${"%.4f".format(estimated)}，实际以服务商账单为准"
 }
 
 internal fun budgetedChunks(messages: List<ChatMessage>, settings: ServiceSettings,
-    promptVersion: String = SummaryProtocol.PROMPT_VERSION): List<app.banzhan.deepseekcontinuation.core.SummaryChunk> {
+    promptVersion: String = SummaryProtocol.PROMPT_VERSION,
+    initialContext: List<ChatMessage> = emptyList()): List<app.banzhan.deepseekcontinuation.core.SummaryChunk> {
     // Context capacity is not a useful target size for a concise summary: a
     // 64k context previously produced 14k-character chunks with only 4k output.
     // Keep each request bounded by its output budget as well as input capacity.
     var limit = minOf(SummaryProtocol.chunkCharacters(settings, promptVersion), (settings.maxOutputTokens * 2).coerceAtMost(6000))
+    require(initialContext.isEmpty() || promptVersion == SummaryProtocol.PROMPT_VERSION) { "旧整理协议不支持跨段参考" }
     while (true) {
-        val chunks = ArchiveLogic.chunks(messages, limit)
-        if (chunks.all { SummaryProtocol.estimatedInputTokens(it.messages, promptVersion).toLong() + settings.maxOutputTokens <= settings.contextTokens }) return chunks
+        val chunks = if (promptVersion == SummaryProtocol.PROMPT_VERSION) {
+            ArchiveLogic.dialogueChunks(messages, limit).mapIndexed { index, chunk ->
+                if (index != 0 || initialContext.isEmpty()) chunk else {
+                    val references = boundedLeadingContext(initialContext, minOf(800, limit / 6))
+                    if (references.isEmpty()) chunk else chunk.copy(
+                        id = hash("resplit-context-v1\n${chunk.id}\n${appJson.encodeToString(references)}"),
+                        contextMessages = references)
+                }
+            }
+        } else ArchiveLogic.chunks(messages, limit)
+        if (chunks.all { SummaryProtocol.estimatedInputTokens(it.messages, promptVersion, it.contextMessages).toLong() +
+                settings.maxOutputTokens <= settings.contextTokens }) return chunks
         require(limit > 2) { "来源编号或消息结构超出上下文预算，请提高上下文长度" }
         limit = (limit / 2).coerceAtLeast(2)
     }
 }
 
-fun estimateOrganization(settings: ServiceSettings, messages: List<ChatMessage>): OrganizationEstimate {
+/** A safely re-split first piece can keep only references already present in its saved request. */
+private fun boundedLeadingContext(messages: List<ChatMessage>, maxCharacters: Int): List<ChatMessage> {
+    var remaining = maxCharacters
+    val result = mutableListOf<ChatMessage>()
+    for (message in messages.asReversed()) {
+        if (remaining <= 0) break
+        var start = (message.content.length - remaining).coerceAtLeast(0)
+        if (start > 0 && start < message.content.length && message.content[start].isLowSurrogate() &&
+            message.content[start - 1].isHighSurrogate()) start++
+        val content = message.content.substring(start)
+        if (content.isNotBlank()) {
+            result += message.copy(content = content)
+            remaining -= content.length
+        }
+    }
+    return result.asReversed()
+}
+
+fun estimateOrganization(settings: ServiceSettings, messages: List<ChatMessage>,
+    promptVersion: String = SummaryProtocol.PROMPT_VERSION): OrganizationEstimate {
     if (messages.isEmpty()) return OrganizationEstimate(0, 0, 0, 0.0)
-    val chunks = budgetedChunks(messages, settings)
-    val input = chunks.sumOf { SummaryProtocol.estimatedInputTokens(it.messages) }
+    val chunks = budgetedChunks(messages, settings, promptVersion)
+    val input = chunks.sumOf { SummaryProtocol.estimatedInputTokens(it.messages, promptVersion, it.contextMessages) }
     val output = chunks.size * settings.maxOutputTokens
     val cost = if (settings.mode == "byok" && settings.inputPricePerMillion != null && settings.outputPricePerMillion != null)
         (input * settings.inputPricePerMillion + output * settings.outputPricePerMillion) / 1_000_000.0 else null

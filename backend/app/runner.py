@@ -9,6 +9,20 @@ from .failure_artifacts import ArtifactStore, ProviderTrace
 from .provider import ProviderOutcome, diagnostic_message, organize, response_diagnostics
 
 
+def source_payload(payload, *, operation="organize"):
+    """Read both admitted legacy jobs and jobs carrying bounded reference text."""
+    value = json.loads(payload)
+    if operation == "organize" and isinstance(value, list):
+        return value, []
+    if (operation == "organize" and isinstance(value, dict) and set(value) == {"messages", "context_messages"}
+            and isinstance(value["messages"], list) and isinstance(value["context_messages"], list)):
+        return value["messages"], value["context_messages"]
+    if (operation == "political_filter" and isinstance(value, dict) and set(value) == {"messages", "operation"}
+            and value["operation"] == "political_filter" and isinstance(value["messages"], list)):
+        return value["messages"], []
+    raise ValueError("Invalid stored source payload")
+
+
 class ServiceLease:
     """One worker process per SQLite database, including startup recovery."""
 
@@ -102,7 +116,7 @@ class Runner:
             return  # Constructor performs the initial expiry cleanup.
         self.artifacts.purge()
 
-    def _capture_failure(self, row, snapshot, messages, execution_settings, trace, outcome):
+    def _capture_failure(self, row, snapshot, messages, execution_settings, trace, outcome, *, context_messages=()):
         mock_mode = snapshot.get("mock_mode", execution_settings.mock_mode) if isinstance(snapshot, dict) else execution_settings.mock_mode
         if outcome.status not in {"failed", "uncertain"} or mock_mode:
             return
@@ -131,6 +145,7 @@ class Runner:
                     saved = self.artifacts.save(
                         row["id"], trace, snapshot, messages, outcome.status, outcome.message,
                         secrets=secrets, ttl_seconds=self.settings.failure_artifacts_ttl_hours * 3600,
+                        **({"context_messages": context_messages} if context_messages else {}),
                     )
                     capture = {
                         "failure_capture_state": "saved", "failure_capture_id": str(uuid.UUID(saved["id"])),
@@ -142,11 +157,12 @@ class Runner:
         diagnostic.update(capture)
         outcome.message = diagnostic_message(label, diagnostic)
 
-    async def _finish_job(self, row, snapshot, messages, execution_settings, trace, outcome):
+    async def _finish_job(self, row, snapshot, messages, execution_settings, trace, outcome, *, context_messages=()):
         # Freeze before capture I/O, including for injected/custom providers.
         trace.finish()
         try:
-            await asyncio.to_thread(self._capture_failure, row, snapshot, messages, execution_settings, trace, outcome)
+            await asyncio.to_thread(self._capture_failure, row, snapshot, messages, execution_settings, trace, outcome,
+                                    **({"context_messages": context_messages} if context_messages else {}))
             await asyncio.to_thread(self.store.finish, row["id"], outcome)
         finally:
             trace.request = None
@@ -158,7 +174,7 @@ class Runner:
             wake.clear()
             row, claiming, finalizing = None, None, None
             execution_settings = self.settings
-            snapshot, messages, trace = {}, [], ProviderTrace()
+            snapshot, messages, context_messages, trace = {}, [], [], ProviderTrace()
             try:
                 try:
                     claiming = asyncio.create_task(asyncio.to_thread(self.store.claim_next))
@@ -174,16 +190,18 @@ class Runner:
                     continue
                 execution_settings = row["execution_settings"]
                 snapshot = json.loads(row["provider"])
-                messages = json.loads(row["payload"])
+                messages, context_messages = source_payload(row["payload"], operation=snapshot.get("operation", "organize"))
                 try:
                     outcome = await asyncio.wait_for(
-                        organize(execution_settings, snapshot, messages, trace=trace),
+                        organize(execution_settings, snapshot, messages, trace=trace,
+                                 **({"context_messages": context_messages} if context_messages else {})),
                         timeout=execution_settings.provider_timeout_seconds,
                     )
                 except asyncio.TimeoutError:
                     trace.finish("total_timeout")
                     outcome = ProviderOutcome("uncertain", "[runner_timeout] 请求达到总时限，本次次数已计入用量，不会自动重试", [])
-                finalizing = asyncio.create_task(self._finish_job(row, snapshot, messages, execution_settings, trace, outcome))
+                finalizing = asyncio.create_task(self._finish_job(row, snapshot, messages, execution_settings, trace, outcome,
+                                                                 **({"context_messages": context_messages} if context_messages else {})))
                 await asyncio.shield(finalizing)
             except asyncio.CancelledError:
                 if finalizing is not None:
@@ -201,11 +219,12 @@ class Runner:
                         if row is not None:
                             execution_settings = row["execution_settings"]
                             snapshot = json.loads(row["provider"])
-                            messages = json.loads(row["payload"])
+                            messages, context_messages = source_payload(row["payload"], operation=snapshot.get("operation", "organize"))
                     if row is not None:
                         trace.finish("cancelled")
                         outcome = ProviderOutcome("uncertain", "服务停止时调用尚未确认，费用预留已保留；不会自动重试", [])
-                        await self._finish_job(row, snapshot, messages, execution_settings, trace, outcome)
+                        await self._finish_job(row, snapshot, messages, execution_settings, trace, outcome,
+                                               **({"context_messages": context_messages} if context_messages else {}))
                 raise
             except Exception:
                 # Do not log exception strings that may contain provider data.
@@ -213,4 +232,5 @@ class Runner:
                     raise
                 trace.finish("other")
                 outcome = ProviderOutcome("uncertain", "任务处理意外中断，费用预留已保留，请联系管理员核对", [])
-                await self._finish_job(row, snapshot, messages, execution_settings, trace, outcome)
+                await self._finish_job(row, snapshot, messages, execution_settings, trace, outcome,
+                                       **({"context_messages": context_messages} if context_messages else {}))

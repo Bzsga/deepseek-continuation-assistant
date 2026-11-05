@@ -25,7 +25,7 @@ class ContinuityCueProtocolTest {
             val payload = """{"entries":[{"id":"model","category":"RECENT","kind":"USER_FACT","text":"保持简短回答","sourceIds":["m1"],"continuityCue":$value}]}"""
             assertEquals(ordinary, SummaryProtocol.validateEntries(payload, messages).single())
         }
-        for (cue in ContinuityCue.entries) {
+        for (cue in ContinuityCue.entries.filter { it != ContinuityCue.RESPONSE_STYLE }) {
             val payload = """{"entries":[{"id":"model","category":"RECENT","kind":"USER_FACT","text":"保持简短回答","sourceIds":["m1"],"continuityCue":"${cue.name}"}]}"""
             assertEquals(cue, SummaryProtocol.validateEntries(payload, messages).single().continuityCue)
         }

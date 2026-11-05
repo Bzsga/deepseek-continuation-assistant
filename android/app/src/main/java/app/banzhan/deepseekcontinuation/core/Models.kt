@@ -38,7 +38,7 @@ enum class EntryCategory { BACKGROUND, PEOPLE, DECISIONS, RECENT, QUOTES }
 enum class EntryKind { USER_FACT, ASSISTANT_SUGGESTION, UNCONFIRMED }
 
 @Serializable
-enum class ContinuityCue { PREFERENCE, CORRECTION, SHARED_LANGUAGE, OPEN_THREAD }
+enum class ContinuityCue { PREFERENCE, CORRECTION, SHARED_LANGUAGE, OPEN_THREAD, RESPONSE_STYLE }
 
 @Serializable
 data class ArchiveEntry(
@@ -85,6 +85,7 @@ data class ContinuitySettings(
     val selectedFragmentIds: List<String>? = null,
     val interactionNotes: String = "",
     val nextMessage: String = "",
+    val includeResponseStyle: Boolean = true,
 )
 
 data class ContinuityFragment(
@@ -102,10 +103,17 @@ data class ContinuityPlan(
     val includedFragmentIds: List<String>,
     val notices: List<String>,
     val export: ExportResult,
+    // Source-validated style entries available, including when their use is disabled.
+    val responseStyleCount: Int = 0,
 )
 
 @Serializable
-data class SummaryChunk(val id: String, val messages: List<ChatMessage>)
+data class SummaryChunk(
+    val id: String,
+    val messages: List<ChatMessage>,
+    // Earlier selected excerpts help resolve references; they are not another primary segment.
+    val contextMessages: List<ChatMessage> = emptyList(),
+)
 
 data class EntryConflict(val existing: ArchiveEntry, val proposed: ArchiveEntry)
 data class MergeResult(val entries: List<ArchiveEntry>, val conflicts: List<EntryConflict>)

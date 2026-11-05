@@ -39,7 +39,7 @@ class ReorganizationPersistenceTest {
         ArchiveEntry("old-summary", EntryCategory.RECENT, "旧自动摘要", listOf("m3"))),
         updatedAt = 1, background = "人工背景", generationMode = "summary",
         continuity = ContinuitySettings(enabled = false, includeRecent = false, selectedFragmentIds = emptyList(),
-            interactionNotes = "手写互动备注", nextMessage = "手写下一句"),
+            interactionNotes = "手写互动备注", nextMessage = "手写下一句", includeResponseStyle = false),
         sourceScopes = listOf(ArchiveSourceScope("c", "main", messages.map { it.id })))
 
     private fun controller(name: String, network: FakeNetwork): Pair<ViewModelStore, AppController> {
@@ -247,16 +247,34 @@ class ReorganizationPersistenceTest {
             completed(controller, start.taskId)
             controller.deleteArchive(archive.id)
             val document = backup(controller)
-            assertEquals(3, document.version)
+            assertEquals(5, document.version)
             BackupValidation.validate(document)
-            assertEquals(archive.id, controller.state.value.archives.single().rebuiltFromArchiveId)
+            val childBeforeRestore = controller.state.value.archives.single()
+            assertEquals(archive.id, childBeforeRestore.rebuiltFromArchiveId)
+            assertFalse(childBeforeRestore.continuity.includeResponseStyle)
             controller.restoreBackup(appJson.encodeToString(document))
             controller.saveSettings(settings)
+            val restoredChild = controller.state.value.archives.single()
+            assertEquals(childBeforeRestore.continuity, restoredChild.continuity)
+            assertFalse(restoredChild.continuity.includeResponseStyle)
             val next = controller.reorganizeArchive(controller.prepareReorganization(start.targetArchiveId))
             completed(controller, next.taskId)
             assertNotEquals(start.targetArchiveId, next.targetArchiveId)
             assertEquals(2, network.keys.size)
-            BackupValidation.validate(backup(controller))
+            val grandchild = controller.state.value.archives.single { it.id == next.targetArchiveId }
+            assertEquals(restoredChild.continuity, grandchild.continuity)
+            assertFalse(grandchild.continuity.includeResponseStyle)
+            val beforeToggle = backup(controller)
+            val enabledStyle = grandchild.continuity.copy(includeResponseStyle = true)
+            controller.saveContinuitySettings(grandchild.id, enabledStyle)
+            val afterToggle = backup(controller)
+            val savedGrandchild = appJson.decodeFromString<Archive>(afterToggle.archives.single { it.id == grandchild.id }.payload)
+            assertEquals(enabledStyle, savedGrandchild.continuity)
+            assertEquals(grandchild.sourceScopes, savedGrandchild.sourceScopes)
+            assertEquals(beforeToggle.tasks, afterToggle.tasks)
+            assertFalse(controller.state.value.archives.single { it.id == restoredChild.id }.continuity.includeResponseStyle)
+            assertEquals(2, network.keys.size)
+            BackupValidation.validate(afterToggle)
         } finally { finish(store, controller) }
     }
 

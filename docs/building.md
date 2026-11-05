@@ -1,6 +1,6 @@
 # 构建与安装
 
-源码版本见 `android/app/build.gradle.kts`。当前 Android 源码为 1.0.6 / versionCode 15，最低 Android 8.0（API 26），compile/target SDK 为 35。
+源码版本见 `android/app/build.gradle.kts`。当前 Android 源码为 1.0.8 / versionCode 17，最低 Android 8.0（API 26），compile/target SDK 为 35。
 
 ## Android 环境
 
@@ -23,7 +23,7 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
 已有不同签名的同包名应用不能被此包覆盖。保留原版数据时，应先备份，或为开发版本设置不同 applicationId 后并行安装。
 
-备份恢复需使用兼容版本：1.0.6 开始写出格式 3，需用 1.0.6 或更新版本恢复；当前源码仍读取格式 1、2。重新整理的确认流程、来源范围及手动修改保护规则见[续聊功能说明](conversation-continuity.md#重新整理已有档案)。
+备份恢复需使用兼容版本：1.0.8 写出格式 5，需用 1.0.8 或更新版本恢复；当前源码读取格式 1–5。交流方式、原话选择、重新整理和手动修改保护规则见[续聊功能说明](conversation-continuity.md)。
 
 PowerShell 也可使用仓库脚本；尖括号为需要替换的工具路径：
 
@@ -76,6 +76,8 @@ python -m venv .venv
 python -m unittest discover -s tools/tests -p test_publish_release.py
 ```
 
-1.0.6 / versionCode 15 本轮验证：83 项定向 JVM 测试通过；Android 11 / API 30 模拟器在 320dp、1.2 倍字体下通过 12 项仪器化测试（6 项数据、6 项 UI），并核对 2 张截图。仪器化测试使用 FakeNetwork，未调用真实模型。最终 release 构建与 lint 通过（0 errors）；正式 APK 通过原证书验签，在该模拟器上覆盖安装、冷启动成功（一次测量为 1021ms），Activity 保持前台。
+本轮增加长文来源、任务恢复、备份及独立政治议题筛查的定点检查。`PoliticalExportUiTest` 用当前设备的合成检查快照验证长预览、导出按钮、误判保留与未完成状态；它拒绝覆盖已有检查记录，不调用模型。设备测试应使用独立 QA 环境，不能运行到存有真实资料的日常安装上。
+
+1.0.8 正式 Release 构建、lintRelease 和原证书验签通过，Android 11 / API 30 模拟器上的 1.0.7 → 1.0.8 覆盖安装与冷启动通过。没有实体手机覆盖结论。
 
 本页提供构建与测试命令，实际验证结果见 [README](../README.md#验证状态与局限) 及已发布版本的 Release 记录；历史测试不代表本轮重新执行所有平台与场景。

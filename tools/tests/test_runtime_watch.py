@@ -283,7 +283,9 @@ class RuntimeWatchTests(unittest.TestCase):
         self.assertEqual(watch.safe_diagnostic({"prompt_version": 2}), {"prompt_version": 2})
         self.assertEqual(watch.safe_diagnostic({"prompt_version": 4}), {"prompt_version": 4})
         self.assertEqual(watch.safe_diagnostic({"prompt_version": 5}), {"prompt_version": 5})
-        for invalid_version in (True, 2.0, 6, "3", PRIVATE):
+        self.assertEqual(watch.safe_diagnostic({"prompt_version": 6}), {"prompt_version": 6})
+        self.assertEqual(watch.safe_diagnostic({"prompt_version": 7}), {"prompt_version": 7})
+        for invalid_version in (True, 2.0, 8, "3", PRIVATE):
             self.assertEqual(watch.safe_diagnostic({"prompt_version": invalid_version}), {})
 
     def test_schema_shapes_exclude_private_keys_values_and_invalid_counts(self):

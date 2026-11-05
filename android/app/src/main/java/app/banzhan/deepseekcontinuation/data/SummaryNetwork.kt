@@ -61,7 +61,9 @@ data class CompanionQuota(
     val contextTokens: Int? = null,
     val maxOutputTokens: Int? = null,
     val dailyReserved: Int? = null,
-    val userDailyReserved: Int? = null
+    val userDailyReserved: Int? = null,
+    val organizationProtocolVersion: Int? = null,
+    val politicalFilterSupported: Boolean = false,
 ) {
     fun organizationBlocker(): String? {
         if (!enabled) return "免费智能整理暂未开放，可以先带走原文，或使用自己的 AI 服务。"
@@ -143,8 +145,9 @@ object SummaryNetwork {
     }
 
     suspend fun summarize(settings: ServiceSettings, messages: List<ChatMessage>,
-        promptVersion: String = SummaryProtocol.PROMPT_VERSION): List<ArchiveEntry> {
-        val body = SummaryProtocol.requestBody(settings, messages, promptVersion)
+        promptVersion: String = SummaryProtocol.PROMPT_VERSION,
+        contextMessages: List<ChatMessage> = emptyList()): List<ArchiveEntry> {
+        val body = SummaryProtocol.requestBody(settings, messages, promptVersion, contextMessages)
         val request = authenticated(chatEndpoint(settings.baseUrl), settings.apiKey)
             .post(body.toRequestBody(contentType)).build()
         val response = exchange(request, mutation = true, secrets = listOf(settings.apiKey))
@@ -158,7 +161,25 @@ object SummaryNetwork {
             val content = message["content"] as? JsonPrimitive ?: error("API 未返回文本内容")
             require(content.isString && content.content.isNotBlank()) { "API 返回了空文本内容" }
             // reasoning_content is intentionally never read or stored.
-            SummaryProtocol.validateEntries(content.content, messages)
+            SummaryProtocol.validateEntries(content.content, messages, contextMessages)
+        }
+    }
+
+    suspend fun filterPolitical(settings: ServiceSettings, messages: List<ChatMessage>): List<ArchiveEntry> {
+        val body = PoliticalFilterProtocol.requestBody(settings, messages)
+        val request = authenticated(chatEndpoint(settings.baseUrl), settings.apiKey)
+            .post(body.toRequestBody(contentType)).build()
+        val response = exchange(request, mutation = true, secrets = listOf(settings.apiKey))
+        return parseResult(ambiguous = true) {
+            val root = objectResponse(response)
+            val choice = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
+                ?: error("API 未返回可读取的筛查结果")
+            val reason = (choice["finish_reason"] as? JsonPrimitive)?.contentOrNull
+            require(reason == null || reason == "stop") { "API 筛查输出未完整结束（$reason），请检查输出预算" }
+            val message = choice["message"] as? JsonObject ?: error("API 缺少 message 内容")
+            val content = message["content"] as? JsonPrimitive ?: error("API 未返回文本内容")
+            require(content.isString && content.content.isNotBlank()) { "API 返回了空文本内容" }
+            PoliticalFilterProtocol.validateEntries(content.content, messages)
         }
     }
 
@@ -257,25 +278,67 @@ object SummaryNetwork {
             require(contextTokens != null && maxOutputTokens != null && contextTokens in 512..262_144 &&
                 maxOutputTokens in 256..8192 && contextTokens > maxOutputTokens) { "免费整理响应的上下文预算无效" }
         }
+        val organizationProtocolVersion = root["organization_protocol_version"]?.takeUnless { it is JsonNull }?.let {
+            val version = (it as? JsonPrimitive)?.takeUnless { value -> value.isString }?.intOrNull
+            require(version != null && version > 0) { "免费整理响应的协议版本无效" }
+            version
+        }
+        // An optional capability must not make ordinary quota/organization
+        // unusable; only an explicit boolean true enables the extra operation.
+        val politicalFilterSupported = (root["political_filter_supported"] as? JsonPrimitive)
+            ?.takeUnless { it.isString }?.booleanOrNull ?: false
         return CompanionQuota(enabled, amount("remaining_cny"), amount("per_job_limit_cny"),
             displayText("model", 160), displayText("message", 500),
             counter("daily_limit"), counter("daily_used"), counter("daily_remaining"),
             counter("user_daily_limit"), counter("user_daily_used"), counter("user_daily_remaining"), resetAt, accessMode,
-            contextTokens, maxOutputTokens, counter("daily_reserved"), counter("user_daily_reserved"))
+            contextTokens, maxOutputTokens, counter("daily_reserved"), counter("user_daily_reserved"), organizationProtocolVersion,
+            politicalFilterSupported)
     }
 
-    suspend fun submit(settings: ServiceSettings, messages: List<ChatMessage>, idempotencyKey: String): RemoteJob {
+    internal fun submissionPayload(messages: List<ChatMessage>, idempotencyKey: String,
+        contextMessages: List<ChatMessage> = emptyList()): String {
         require(messages.isNotEmpty()) { "没有可整理的消息" }
         require(idempotencyKey.isNotBlank() && idempotencyKey.length <= 200) { "任务幂等编号无效" }
         val payload = buildJsonObject {
             put("idempotency_key", idempotencyKey)
             put("messages", SummaryProtocol.messagesJson(messages))
+            // Empty context retains the exact legacy body/idempotency payload.
+            if (contextMessages.isNotEmpty()) put("context_messages", SummaryProtocol.messagesJson(contextMessages))
         }.toString()
         require(payload.toByteArray(Charsets.UTF_8).size <= 512_000) { "试用请求过大，请减少选择范围" }
+        return payload
+    }
+
+    suspend fun submit(settings: ServiceSettings, messages: List<ChatMessage>, idempotencyKey: String,
+        contextMessages: List<ChatMessage> = emptyList()): RemoteJob {
+        val payload = submissionPayload(messages, idempotencyKey, contextMessages)
         val request = authenticated(companionEndpoint(settings.companionUrl, "jobs"), settings.trialToken)
             .post(payload.toRequestBody(contentType)).build()
         return parseResult(ambiguous = true) {
             parseJob(exchange(request, mutation = true, secrets = listOf(settings.trialToken)))
+        }
+    }
+
+    internal fun politicalSubmissionPayload(messages: List<ChatMessage>, idempotencyKey: String): String {
+        PoliticalFilterProtocol.validateMessages(messages)
+        require(idempotencyKey.isNotBlank() && idempotencyKey.length <= 200) { "任务幂等编号无效" }
+        return buildJsonObject {
+            put("idempotency_key", idempotencyKey)
+            put("messages", SummaryProtocol.messagesJson(messages))
+            put("operation", "political_filter")
+        }.toString().also {
+            require(it.toByteArray(Charsets.UTF_8).size <= 512_000) { "筛查请求过大，请减少文字" }
+        }
+    }
+
+    suspend fun submitPolitical(settings: ServiceSettings, messages: List<ChatMessage>, idempotencyKey: String): RemoteJob {
+        val payload = politicalSubmissionPayload(messages, idempotencyKey)
+        val request = authenticated(companionEndpoint(settings.companionUrl, "jobs"), settings.trialToken)
+            .post(payload.toRequestBody(contentType)).build()
+        return parseResult(ambiguous = true) {
+            val job = parseJob(exchange(request, mutation = true, secrets = listOf(settings.trialToken)))
+            if (job.status == "completed" || job.entries.isNotEmpty())
+                job.copy(entries = PoliticalFilterProtocol.validateEntries(job.entries, messages)) else job
         }
     }
 

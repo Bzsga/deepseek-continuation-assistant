@@ -623,6 +623,7 @@ internal fun ContinuationResultScreen(
     busy: Boolean = false,
     onReorganize: () -> Unit = {},
     onOpenRecord: (String) -> Unit = {},
+    onPoliticalExport: () -> Unit = {},
 ) {
     var export by remember(archive, conversations) { mutableStateOf<Result<ExportResult>?>(null) }
     var large by remember(archive, conversations) { mutableStateOf(false) }
@@ -702,6 +703,9 @@ internal fun ContinuationResultScreen(
                             Text("复制并打开 DeepSeek")
                         }
                     if (!large) OutlinedButton(onClick = { onSave(text) }) { Text("保存续聊文件") }
+                    if (archive.generationMode == "summary") {
+                        OutlinedButton(onClick = onPoliticalExport, enabled = !busy) { Text("生成温和版") }
+                    }
                     TextButton(onClick = onOpenDeepSeek) { Text("打开 DeepSeek") }
                 }
                 Text(

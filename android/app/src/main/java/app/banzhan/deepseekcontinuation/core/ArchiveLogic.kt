@@ -48,6 +48,139 @@ object ArchiveLogic {
         return result
     }
 
+    /**
+     * Keeps exchanges together when possible. The historical [chunks] algorithm stays frozen
+     * for persisted requests; callers opt new tasks into this separately versioned layout.
+     * [maxCharacters] bounds primary text. Earlier reference text adds at most 800 characters
+     * (or one sixth of that bound), and must be included in the caller's request budget.
+     */
+    fun dialogueChunks(messages: List<ChatMessage>, maxCharacters: Int = 6000): List<SummaryChunk> {
+        require(maxCharacters >= 2) { "分段上限至少为 2 个字符，才能完整保存 Unicode 字符。" }
+        val result = mutableListOf<SummaryChunk>()
+        val pending = mutableListOf<DialoguePart>()
+        var characters = 0
+        val previousUser = IntArray(messages.size)
+        var lastUser = -1
+        messages.forEachIndexed { index, message ->
+            previousUser[index] = lastUser
+            if (message.role.equals("user", ignoreCase = true)) lastUser = index
+        }
+
+        fun flush() {
+            if (pending.isEmpty()) return
+            val first = pending.first()
+            val context = precedingContext(messages, previousUser, first.sourceIndex, first.offset,
+                minOf(800, maxCharacters / 6))
+            result += SummaryChunk(
+                hash("dialogue-chunk-v1", *pending.map { it.identity() }.toTypedArray(),
+                    hash("context-v1", *context.map { it.identity() }.toTypedArray())),
+                pending.map { it.message }, context.map { it.message },
+            )
+            pending.clear()
+            characters = 0
+        }
+
+        fun add(index: Int, start: Int, end: Int) {
+            val message = messages[index]
+            val part = if (start == 0 && end == message.content.length) message
+                else message.copy(content = message.content.substring(start, end))
+            pending += DialoguePart(part, index, start)
+            characters += part.content.length
+        }
+
+        var turnStart = 0
+        while (turnStart < messages.size) {
+            var turnEnd = turnStart + 1
+            while (turnEnd < messages.size && !messages[turnEnd].role.equals("user", ignoreCase = true)) turnEnd++
+            val turnCharacters = (turnStart until turnEnd).sumOf { messages[it].content.length.toLong() }
+            if (turnCharacters <= maxCharacters) {
+                if (characters.toLong() + turnCharacters > maxCharacters) flush()
+                for (index in turnStart until turnEnd) add(index, 0, messages[index].content.length)
+            } else {
+                // A large exchange falls back to whole messages, then natural text boundaries.
+                flush()
+                for (index in turnStart until turnEnd) {
+                    val text = messages[index].content
+                    if (text.length <= maxCharacters) {
+                        if (characters + text.length > maxCharacters) flush()
+                        add(index, 0, text.length)
+                    } else {
+                        var offset = 0
+                        while (offset < text.length) {
+                            // Keep a short question with the first part of a long answer, but
+                            // do not create tiny fragments merely to fill a preceding segment.
+                            if (maxCharacters - characters < maxOf(2, maxCharacters / 2)) flush()
+                            val end = naturalEnd(text, offset, maxCharacters - characters)
+                            add(index, offset, end)
+                            offset = end
+                            if (offset < text.length) flush()
+                        }
+                    }
+                }
+            }
+            turnStart = turnEnd
+        }
+        flush()
+        return result
+    }
+
+    private data class DialoguePart(val message: ChatMessage, val sourceIndex: Int, val offset: Int) {
+        fun identity(): String = hash("dialogue-part-v1", sourceIndex.toString(), offset.toString(),
+            message.id, message.role, message.content, message.timestamp, *message.attachments.toTypedArray())
+    }
+
+    private fun precedingContext(messages: List<ChatMessage>, previousUser: IntArray, sourceIndex: Int,
+        offset: Int, maxCharacters: Int): List<DialoguePart> {
+        if (maxCharacters == 0) return emptyList()
+        val nearestIndex = if (offset > 0) sourceIndex else sourceIndex - 1
+        if (nearestIndex < 0) return emptyList()
+        val userIndex = if (offset > 0 && messages[sourceIndex].role.equals("user", ignoreCase = true)) sourceIndex
+            else previousUser[sourceIndex]
+        // Preserve a short question/explicit instruction as an anchor when a long answer
+        // would otherwise consume the entire reference allowance. Never look ahead.
+        val anchor = if (userIndex >= 0 && userIndex < nearestIndex &&
+            messages[userIndex].content.isNotBlank() && messages[userIndex].content.length <= maxCharacters / 2)
+            DialoguePart(messages[userIndex], userIndex, 0) else null
+        var remaining = maxCharacters - (anchor?.message?.content?.length ?: 0)
+        val tail = mutableListOf<DialoguePart>()
+        var index = nearestIndex
+        // A character bound alone is insufficient for attachment-only/empty messages.
+        val maximumTailMessages = if (anchor == null) 4 else 3
+        while (index >= 0 && remaining > 0 && tail.size < maximumTailMessages && index != anchor?.sourceIndex) {
+            val source = messages[index]
+            val end = if (index == sourceIndex) offset else source.content.length
+            if (end > 0) {
+                var start = maxOf(0, end - remaining)
+                if (start > 0 && start < end && source.content[start].isLowSurrogate() && source.content[start - 1].isHighSurrogate()) start++
+                if (start < end) {
+                    val part = source.copy(content = source.content.substring(start, end))
+                    // A useful earlier message can end in a long blank tail. Such an
+                    // excerpt adds no reference and the companion rejects blank messages.
+                    if (part.content.isNotBlank()) {
+                        tail += DialoguePart(part, index, start)
+                        remaining -= part.content.length
+                    }
+                }
+            }
+            index--
+        }
+        return listOfNotNull(anchor) + tail.asReversed()
+    }
+
+    private fun naturalEnd(text: String, start: Int, length: Int): Int {
+        val end = safeEnd(text, start, length)
+        if (end == text.length) return end
+        val earliest = start + maxOf(1, length * 2 / 3)
+        // Prefer a paragraph/line boundary near the limit, then a sentence boundary.
+        for (index in end - 1 downTo earliest) if (text[index] == '\n') return index + 1
+        for (index in end - 1 downTo earliest) {
+            val character = text[index]
+            if (character in "。！？；" || (character in ".!?;" &&
+                    (index + 1 == text.length || text[index + 1].isWhitespace()))) return index + 1
+        }
+        return end
+    }
+
     fun localEntries(messages: List<ChatMessage>): List<ArchiveEntry> {
         return messages.flatMap { message ->
             val content = message.content
