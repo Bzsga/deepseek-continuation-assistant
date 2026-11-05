@@ -1,6 +1,5 @@
 package app.banzhan.deepseekcontinuation.data
 
-import app.banzhan.deepseekcontinuation.core.AppUpdateManifest
 import app.banzhan.deepseekcontinuation.core.AppUpdateManifestParser
 import java.io.IOException
 import kotlinx.coroutines.CoroutineStart
@@ -17,17 +16,13 @@ import okhttp3.ResponseBody
 import okio.Buffer
 import okio.BufferedSource
 import okio.Timeout
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TemporaryFolder
 
 class AppUpdateNetworkTest {
-    @get:Rule val temporary = TemporaryFolder()
 
     @Test
     fun checkUsesOnlyTheFixedPublicEndpointAndNoCredentials() = runBlocking {
@@ -51,28 +46,6 @@ class AppUpdateNetworkTest {
     }
 
     @Test
-    fun downloadStreamsTheExpectedBytesAndReportsFinalProgress() = runBlocking {
-        val bytes = byteArrayOf(1, 2, 3, 4)
-        val factory = FakeFactory { request -> response(request, bytes) }
-        val part = temporary.newFile("complete.part")
-        val progress = mutableListOf<Pair<Long, Long>>()
-        AppUpdateNetwork(factory).download(manifest(), part) { read, total -> progress += read to total }
-        assertArrayEquals(bytes, part.readBytes())
-        assertEquals(4L to 4L, progress.last())
-        assertEquals(manifest().apkUrl, factory.last.request().url.toString())
-    }
-
-    @Test
-    fun unknownLengthOversizeAndTruncatedDownloadsNeverLeaveACompletePart() = runBlocking {
-        listOf(byteArrayOf(1, 2, 3), byteArrayOf(1, 2, 3, 4, 5)).forEachIndexed { index, bytes ->
-            val factory = FakeFactory { request -> response(request, bytes, declaredSize = -1) }
-            val part = temporary.newFile("rejected-$index.part")
-            expectFailure { AppUpdateNetwork(factory).download(manifest(), part) { _, _ -> } }
-            assertFalse(part.exists())
-        }
-    }
-
-    @Test
     fun cancellingACheckCancelsItsActualHttpCall() = runBlocking {
         val factory = FakeFactory { null }
         val job = launch(start = CoroutineStart.UNDISPATCHED) { AppUpdateNetwork(factory).fetchManifest() }
@@ -84,7 +57,6 @@ class AppUpdateNetworkTest {
         assertTrue(job.isCancelled)
     }
 
-    private fun manifest(): AppUpdateManifest = AppUpdateManifestParser.parse(manifestJson())
 
     private fun manifestJson() = """{"schemaVersion":1,"packageName":"app.banzhan.deepseekcontinuation","versionCode":7,"versionName":"1.0.0-preview.7","apkUrl":"https://digimonlegend.com/continuation-updates/apks/preview7.apk","apkSize":4,"sha256":"${"a".repeat(64)}","minSdk":26,"releasedAt":"2026-11-04T00:00:00Z","changelog":["支持应用内更新"]}"""
 

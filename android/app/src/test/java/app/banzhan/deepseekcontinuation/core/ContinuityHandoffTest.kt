@@ -46,12 +46,16 @@ class ContinuityHandoffTest {
         val off = ContinuityLogic.export(source, listOf(conversation)).text
         assertFalse(off.contains("已经解释过的问题"))
         assertFalse(off.contains("【接续停点】"))
+        assertTrue(off.contains("先简短自然地接上一两句"))
         val recent = ContinuityLogic.buildPlan(source.copy(continuity = source.continuity.copy(includeRecent = true)), listOf(conversation))
         assertTrue(recent.export.text.contains("已经解释过的问题"))
         assertTrue(recent.export.text.contains("不必重复回答上一轮"))
+        assertTrue(recent.export.text.contains("先简短自然地接上一两句"))
+        assertFalse(recent.export.text.contains("等我接着说"))
         val next = ContinuityLogic.export(source.copy(continuity = source.continuity.copy(includeRecent = true, nextMessage = "现在想聊另一件事。")), listOf(conversation)).text
         assertTrue(next.endsWith("优先回应我接下来想说的内容。\n"))
         assertFalse(next.contains("等我接着说"))
+        assertFalse(next.contains("先简短自然地接上一两句"))
     }
 
     @Test fun reversedRangesStillUseBranchOrderButMultipleBranchesHaveNoGlobalStop() {
@@ -61,6 +65,7 @@ class ContinuityHandoffTest {
         val plan = ContinuityLogic.buildPlan(source, listOf(conversation))
         assertEquals("u1", plan.recentFragments.last().messages.last().id)
         assertTrue(plan.export.text.contains("请从这句话继续回应"))
+        assertFalse(plan.export.text.contains("先简短自然地接上一两句"))
         val second = ConversationBranch("second", "另一个版本", listOf(user("u2", "另一个问题"), assistant("a2", "另一个回答")))
         val branched = conversation.copy(branches = conversation.branches + second)
         val mixed = source.copy(sourceScopes = source.sourceScopes + ArchiveSourceScope("c", "second", listOf("u2", "a2")))

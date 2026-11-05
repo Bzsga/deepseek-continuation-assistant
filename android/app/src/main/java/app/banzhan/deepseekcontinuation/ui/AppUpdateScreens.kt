@@ -86,7 +86,7 @@ internal fun AppUpdateCard(
                 Text("正在检查新版本…", style = MaterialTheme.typography.bodySmall)
             }
             state.message
-                ?.takeIf { it.isNotBlank() }
+                ?.takeIf { it.isNotBlank() && state.status != AppUpdateStatus.DOWNLOADING }
                 ?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
             UpdateProgress(state)
             UpdateInstallGuidance(state, installBlockedReason, installPermissionRequired)
@@ -166,6 +166,10 @@ private fun UpdateProgress(state: AppUpdateState) {
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            Text(
+                state.message ?: "可以切到后台，系统会继续下载。",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         AppUpdateStatus.VERIFYING -> {
             LinearProgressIndicator(Modifier.fillMaxWidth())

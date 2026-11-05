@@ -3,7 +3,6 @@ package app.banzhan.deepseekcontinuation.data
 import app.banzhan.deepseekcontinuation.core.AppUpdateManifest
 import app.banzhan.deepseekcontinuation.core.AppUpdateManifestParser
 import java.io.ByteArrayOutputStream
-import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -45,50 +44,6 @@ internal class AppUpdateNetwork(private val calls: Call.Factory = updateHttpClie
             AppUpdateManifestParser.parse(output.toByteArray())
         } catch (_: IllegalArgumentException) {
             throw AppUpdateDownloadException("更新信息无效，请稍后重新检查。")
-        }
-    }
-
-    suspend fun download(manifest: AppUpdateManifest, part: File, progress: (Long, Long) -> Unit) {
-        // Re-parse before trusting a URL, even if a caller created the data class directly.
-        val validated = AppUpdateManifestParser.parse(updateJson.encodeToString(AppUpdateManifest.serializer(), manifest))
-        exchange(
-            Request.Builder().url(validated.apkUrl).header("Accept", "application/vnd.android.package-archive")
-                .header("Accept-Encoding", "identity").get().build(),
-        ) { response, active ->
-            val body = response.body ?: throw AppUpdateDownloadException("更新包下载失败，请重试。")
-            val declaredSize = body.contentLength()
-            if (declaredSize >= 0 && declaredSize != validated.apkSize) {
-                throw AppUpdateDownloadException("更新包大小与更新信息不一致，请重新检查更新。")
-            }
-            var completed = false
-            try {
-                var countBytes = 0L
-                var lastProgress = 0L
-                part.outputStream().use { output ->
-                    body.byteStream().use { input ->
-                        val buffer = ByteArray(32 * 1024)
-                        while (true) {
-                            if (!active()) throw CancellationException()
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            countBytes += count
-                            if (count == 0 || countBytes > validated.apkSize || countBytes > AppUpdateManifestParser.MAX_APK_BYTES) {
-                                throw AppUpdateDownloadException("更新包大小校验失败，请重新下载。")
-                            }
-                            output.write(buffer, 0, count)
-                            if (countBytes - lastProgress >= 256 * 1024 || countBytes == validated.apkSize) {
-                                progress(countBytes, validated.apkSize)
-                                lastProgress = countBytes
-                            }
-                        }
-                    }
-                }
-                if (countBytes != validated.apkSize) throw AppUpdateDownloadException("更新包未完整下载，请重试。")
-                if (!active()) throw CancellationException()
-                completed = true
-            } finally {
-                if (!completed) part.delete()
-            }
         }
     }
 
