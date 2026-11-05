@@ -509,7 +509,7 @@ def test_complete_single_object_wrappers_are_compatible_without_content_changes(
 
 @pytest.mark.parametrize("content,expected", [
     ('{"entries":[]}{"entries":[]}', "extra_data"),
-    ('{"entries":[],"entries":[]}', "duplicate_key"),
+    ('{"entries":[],"entries":[{}]}', "duplicate_key"),
     ('{"entries":[],"unused":NaN}', "non_finite_number"),
     ('{"entries":[]', "expected_comma"),
     ('{"entries":[{"text":"' + PRIVATE_MARKER, "unterminated_string"),
@@ -533,6 +533,81 @@ def test_json_failures_keep_only_fixed_error_kind_and_location(settings, message
     assert result.entries == []
     assert result.output_tokens == 80
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("duplicate", ["sourceIds", "text", "entries", "nested"])
+def test_identical_json_duplicate_keys_preserve_content_sources_and_usage(settings, messages, monkeypatch, duplicate):
+    row = entry(["m1"], "USER_FACT", text=PRIVATE_MARKER)
+    encoded_row = json.dumps(row)
+    if duplicate in {"sourceIds", "text"}:
+        repeated = json.dumps(duplicate) + ":" + json.dumps(row[duplicate])
+        content = '{"entries":[' + encoded_row[:-1] + "," + repeated + "}]}"
+    elif duplicate == "entries":
+        content = '{"entries":[' + encoded_row + '],"entries":[' + encoded_row + "]}"
+    else:
+        # Nested objects compare by key content; array order remains significant.
+        repeated_key = json.dumps(PRIVATE_MARKER)
+        content = ('{"entries":[' + encoded_row + '],"metadata":{' + repeated_key +
+                   ':{"a":[true,null,1.0],"b":1},' + repeated_key +
+                   ':{"b":1,"a":[true,null,1.0]}}}')
+    requests = mock_http(monkeypatch, envelope(content))
+    outcome = execute(settings, messages)
+    assert outcome.status == "completed" and len(outcome.entries) == 1
+    assert outcome.entries[0]["text"] == PRIVATE_MARKER
+    assert outcome.entries[0]["sourceIds"] == [messages[0]["id"]]
+    assert outcome.entries[0]["kind"] == "USER_FACT"
+    assert "[json_identical_duplicates]" in outcome.message
+    diagnostic = json.loads(outcome.message.split(" diagnostic=", 1)[1])
+    assert diagnostic["json_identical_duplicates"] is True
+    assert PRIVATE_MARKER not in outcome.message and settings.api_key not in outcome.message
+    assert outcome.usage_known and outcome.cost_micros == 840
+    assert (outcome.input_tokens, outcome.output_tokens) == (100, 80)
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("left,right", [
+    ('"first"', '"second"'), ('["m1"]', '["m2"]'),
+    ('["m1","m2"]', '["m2","m1"]'),
+    ('true', '1'), ('1', '1.0'), ('{"a":true}', '{"a":1}'),
+    ('{"a":1}', '{"b":1}'),
+    ('9007199254740992.0', '9007199254740993.0'), ('1e400', '2e400'),
+    ('1e-400', '2e-400'),
+])
+def test_conflicting_json_duplicates_never_use_python_coercion_or_float_rounding(
+        settings, messages, monkeypatch, left, right):
+    key = json.dumps(PRIVATE_MARKER)
+    content = document()[:-1] + "," + key + ":" + left + "," + key + ":" + right + "}"
+    requests = mock_http(monkeypatch, envelope(content))
+    outcome = execute(settings, messages)
+    assert outcome.status == "failed" and "[json]" in outcome.message and outcome.entries == []
+    diagnostic = json.loads(outcome.message.split(" diagnostic=", 1)[1])
+    assert diagnostic["json_error_type"] == "duplicate_key"
+    assert PRIVATE_MARKER not in outcome.message and settings.api_key not in outcome.message
+    assert outcome.usage_known and outcome.cost_micros == 840 and len(requests) == 1
+
+
+@pytest.mark.parametrize("field,value,expected", [
+    ("sourceIds", ["m999"], "unknown_source"), ("sourceIds", [1], "schema"),
+    ("text", 123, "schema"), ("kind", 1, "schema"),
+])
+def test_identical_json_duplicates_never_bypass_source_or_field_validation(
+        settings, messages, monkeypatch, field, value, expected):
+    row = entry(**{field: value})
+    encoded_row = json.dumps(row)
+    content = ('{"entries":[' + encoded_row[:-1] + "," + json.dumps(field) + ":" +
+               json.dumps(value) + "}]}")
+    requests = mock_http(monkeypatch, envelope(content))
+    outcome = execute(settings, messages)
+    assert outcome.status == "failed" and f"[{expected}]" in outcome.message and outcome.entries == []
+    assert outcome.usage_known and outcome.cost_micros == 840 and len(requests) == 1
+
+
+def test_nested_conflicts_and_later_syntax_errors_do_not_emit_successful_deduplication_warnings():
+    for content in ('{"a":1,"a":1,"nested":{"b":1,"b":2}}', '{"a":1,"a":1} trailing'):
+        warnings = set()
+        with pytest.raises(ProtocolError):
+            parse_generated_document(content, warnings=warnings)
+        assert warnings == set()
 
 
 @pytest.mark.parametrize("change,expected", [({"sourceIds": ["m999"]}, "unknown_source"),
@@ -617,14 +692,24 @@ def test_probe_has_explicit_candidate_attempt_depth_and_character_limits():
     }
 
 
-def test_probe_rejects_duplicate_keys_and_never_reports_raw_characters_or_values(settings, messages, monkeypatch):
-    content = PRIVATE_MARKER + '{"entries":[],"entries":[]}'
+def test_probe_rejects_conflicting_duplicates_and_never_reports_raw_characters_or_values(settings, messages, monkeypatch):
+    content = PRIVATE_MARKER + '{"entries":[],"entries":[{}]}'
     requests = mock_http(monkeypatch, envelope(content))
     result = execute(settings, messages)
     info = json.loads(result.message.split(" diagnostic=", 1)[1])
     assert info["json_candidate_count"] == 0
     assert PRIVATE_MARKER not in result.message
     assert not any(name in info for name in ("json_first_codepoint", "json_first_character", "json_keys", "json_candidates", "json_content"))
+    assert len(requests) == 1
+
+
+def test_probe_can_observe_identical_duplicates_without_accepting_mixed_prose(settings, messages, monkeypatch):
+    requests = mock_http(monkeypatch, envelope(PRIVATE_MARKER + '{"entries":[],"entries":[]}'))
+    outcome = execute(settings, messages)
+    assert outcome.status == "failed" and "[json]" in outcome.message and outcome.entries == []
+    info = json.loads(outcome.message.split(" diagnostic=", 1)[1])
+    assert info["json_candidate_count"] == 1 and info["json_has_object_candidate"] is True
+    assert "[json_identical_duplicates]" not in outcome.message and PRIVATE_MARKER not in outcome.message
     assert len(requests) == 1
 
 

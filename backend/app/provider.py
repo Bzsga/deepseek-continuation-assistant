@@ -5,7 +5,7 @@ import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, DecimalException, ROUND_CEILING
 
 import httpx
 from pydantic import ValidationError
@@ -86,13 +86,25 @@ def json_error_diagnostics(error):
             "json_error_column": error.colno}
 
 
-def _unique_json_pairs(pairs):
+def _unique_json_pairs(pairs, *, warnings=None):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ProtocolError("json", diagnostic={"json_error_type": "duplicate_key"})
+            if not _same_json_value(result[key], value):
+                raise ProtocolError("json", diagnostic={"json_error_type": "duplicate_key"})
+            if warnings is not None:
+                warnings.add("json_identical_duplicates")
+            continue
         result[key] = value
     return result
+
+
+def _exact_json_float(value):
+    # Float rounding/overflow must not make conflicting duplicate values equal.
+    try:
+        return Decimal(value)
+    except DecimalException:
+        raise ProtocolError("json", diagnostic={"json_error_type": "parser_limit"}) from None
 
 
 def _reject_json_constant(_value):
@@ -168,7 +180,7 @@ def json_candidate_diagnostics(body):
                     attempts += 1
                     try:
                         candidate = json.loads(sample[start:index + 1], object_pairs_hook=_unique_json_pairs,
-                                               parse_constant=_reject_json_constant)
+                                               parse_float=_exact_json_float, parse_constant=_reject_json_constant)
                     except (ValueError, RecursionError):
                         pass
                     else:
@@ -188,7 +200,7 @@ def parse_generated_document(content, *, warnings=None, diagnostic_out=None):
     body, removed, had_bom = strip_json_edge_format(body)
     diagnostic = {"json_wrapper": "plain", "json_has_bom": had_bom,
                   "json_first_char": first_kind, "json_invisible_prefix": first_kind in {"format", "control"},
-                  "json_edge_format_removed": removed}
+                  "json_edge_format_removed": removed, "json_identical_duplicates": False}
 
     def fail(info):
         safe = {**diagnostic, "json_chars": len(body), **json_candidate_diagnostics(body), **info}
@@ -211,18 +223,23 @@ def parse_generated_document(content, *, warnings=None, diagnostic_out=None):
         diagnostic["json_has_bom"] |= inside_bom
         diagnostic["json_edge_format_removed"] |= inside_removed
     diagnostic["json_chars"] = len(body)
+    parsed_warnings = set()
     try:
-        document = json.loads(body, object_pairs_hook=_unique_json_pairs, parse_constant=_reject_json_constant)
+        document = json.loads(body, object_pairs_hook=lambda pairs: _unique_json_pairs(pairs, warnings=parsed_warnings),
+                              parse_float=_exact_json_float, parse_constant=_reject_json_constant)
     except json.JSONDecodeError as error:
         fail(json_error_diagnostics(error))
     except ProtocolError as error:
         fail(error.diagnostic)
     except (ValueError, RecursionError):
         fail({"json_error_type": "parser_limit"})
+    diagnostic["json_identical_duplicates"] = "json_identical_duplicates" in parsed_warnings
     if diagnostic_out is not None:
         diagnostic_out.update(diagnostic)
     if diagnostic["json_edge_format_removed"] and warnings is not None:
         warnings.add("json_edge_format")
+    if warnings is not None:
+        warnings.update(parsed_warnings)
     return document
 
 
@@ -398,7 +415,7 @@ def _value_type(value):
         return "bool"
     if type(value) is int:
         return "integer"
-    if isinstance(value, float):
+    if isinstance(value, (float, Decimal)):
         return "number"
     if isinstance(value, str):
         return "string"
@@ -855,6 +872,8 @@ async def _organize(settings: Settings, snapshot, messages, trace):
             message += "非标准分类已归入续聊事项，正文和来源均已保留。"
         if "json_edge_format" in warnings:
             message += "已清除回复边缘的格式标记，JSON 正文未改写。"
+        if "json_identical_duplicates" in warnings:
+            message += "已合并回复中值与类型一致的重复字段，正文与来源均已保留。"
         if "schema_normalized" in warnings:
             message += "已兼容整理结果的结构写法，正文与来源均已保留。"
         if "defaulted_category" in warnings:

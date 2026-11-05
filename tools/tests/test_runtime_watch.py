@@ -271,14 +271,14 @@ class RuntimeWatchTests(unittest.TestCase):
         safe = {"prompt_version": 3, "json_first_char": "letter", "json_invisible_prefix": False,
                 "json_edge_format_removed": False, "json_candidate_count": 1,
                 "json_has_object_candidate": True, "json_has_array_candidate": False,
-                "json_scan_limited": False}
+                "json_scan_limited": False, "json_identical_duplicates": True}
         filtered = watch.safe_diagnostic({**safe, "json_first_character": PRIVATE,
                                           "json_first_codepoint": 12345, "json_candidates": [PRIVATE],
                                           "json_keys": [PRIVATE]})
         self.assertEqual(filtered, safe)
         self.assertEqual(watch.safe_diagnostic({"json_first_char": PRIVATE, "json_candidate_count": 3,
                                                "json_invisible_prefix": PRIVATE,
-                                               "json_has_object_candidate": 1}), {})
+                                               "json_has_object_candidate": 1, "json_identical_duplicates": PRIVATE}), {})
         self.assertEqual(watch.safe_diagnostic({"prompt_version": 2}), {"prompt_version": 2})
         self.assertEqual(watch.safe_diagnostic({"prompt_version": 4}), {"prompt_version": 4})
         for invalid_version in (True, 2.0, 5, "3", PRIVATE):
