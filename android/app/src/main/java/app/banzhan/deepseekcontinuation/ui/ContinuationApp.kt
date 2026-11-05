@@ -15,7 +15,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -26,7 +25,6 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
@@ -589,6 +587,10 @@ fun ContinuationApp(
                                     ContinuationResultScreen(
                                         archive,
                                         currentTask,
+                                        conversations = state.conversations,
+                                        onSaveContinuity = { settings ->
+                                            controller.saveContinuitySettings(archive.id, settings)
+                                        },
                                         onCopyAndOpen = { text ->
                                             run {
                                                 require(
@@ -784,10 +786,15 @@ fun ContinuationApp(
                     }
                 },
             )
-        exportArchive?.let { archive ->
+        exportArchive?.let { snapshot ->
+            val archive = state.archives.firstOrNull { it.id == snapshot.id } ?: return@let
             ExportDialog(
                 archive,
+                state.conversations,
                 { exportArchive = null },
+                onSaveContinuity = { settings ->
+                    controller.saveContinuitySettings(archive.id, settings)
+                },
                 onCopy = { text ->
                     run {
                         (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
@@ -970,58 +977,75 @@ private fun openDeepSeek(context: Context) {
 @Composable
 private fun ExportDialog(
     archive: Archive,
+    conversations: List<ImportedConversation>,
     onDismiss: () -> Unit,
+    onSaveContinuity: suspend (ContinuitySettings) -> Unit,
     onCopy: (String) -> Unit,
     onSave: (String) -> Unit,
     onShare: (String) -> Unit,
 ) {
-    var limit by remember(archive.id) { mutableStateOf("6000") }
-    val result =
-        remember(archive, limit) {
-            runCatching {
-                val max = requireNotNull(limit.toIntOrNull()) { "请输入字符数" }
-                require(max in 500..100000) { "字符范围为 500–100000" }
-                ArchiveLogic.export(archive, max)
-            }
+    var result by remember(archive, conversations) { mutableStateOf<Result<ExportResult>?>(null) }
+    var large by remember(archive, conversations) { mutableStateOf(false) }
+    var previewLimit by rememberSaveable(archive.id) { mutableIntStateOf(8000) }
+    LaunchedEffect(archive, conversations) {
+        val prepared = withContext(Dispatchers.Default) {
+            val export = runCatching { ArchiveLogic.continuationExport(archive, conversations) }
+            export to ((export.getOrNull()?.text?.toByteArray(Charsets.UTF_8)?.size ?: 0) > 60 * 1024)
         }
+        large = prepared.second
+        result = prepared.first
+    }
     AppDialog(
         "带到下一段对话",
         onDismiss,
         actions = {
             ActionRow {
                 TextButton(onClick = onDismiss) { Text("关闭") }
-                result.getOrNull()?.let { export ->
-                    Button(onClick = { onCopy(export.text) }) { Text("复制 Markdown") }
-                    OutlinedButton(onClick = { onSave(export.text) }) { Text("保存文件") }
-                    TextButton(onClick = { onShare(export.text) }) { Text("系统分享") }
+                result?.getOrNull()?.let { export ->
+                    if (large) {
+                        Button(onClick = { onSave(export.text) }) { Text("保存文件") }
+                    } else {
+                        Button(onClick = { onCopy(export.text) }) { Text("复制 Markdown") }
+                        OutlinedButton(onClick = { onSave(export.text) }) { Text("保存文件") }
+                        TextButton(onClick = { onShare(export.text) }) { Text("系统分享") }
+                    }
                 }
             }
         },
     ) {
-        OutlinedTextField(
-            limit,
-            { limit = it },
-            Modifier.fillMaxWidth(),
-            label = { Text("目标字符预算") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            singleLine = true,
-        )
-        result.fold(
+        ContinuitySetupCard(archive, conversations, onSaveContinuity)
+        if (result == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+        result?.fold(
             onSuccess = { export ->
                 Text(
-                    "${export.text.length} 字符 · 省略 ${export.omittedCount} 条",
+                    "${export.text.length} 字符",
                     style = MaterialTheme.typography.bodySmall,
                     color = Blue,
                 )
                 if (export.pinnedOverflow)
                     Text(
-                        "部分固定条目超出预算而未被导出。请提高预算或调整固定项，再核对预览。",
+                        "部分固定条目未被带入，请核对预览。",
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
-                Text("复制后，在新对话里粘贴这份档案，并补充你接下来想聊的内容。", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (large) "内容较长，请保存为文件后，在 DeepSeek 新对话中添加文件。"
+                    else "复制后，在 DeepSeek 新对话里粘贴，或添加保存的文件。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 HorizontalDivider()
-                SelectionContainer { Text(export.text, style = MaterialTheme.typography.bodySmall) }
+                SelectionContainer { Text(export.text.take(previewLimit), style = MaterialTheme.typography.bodySmall) }
+                if (export.text.length > previewLimit) {
+                    Text(
+                        if (large) "当前预览前 $previewLimit 字符，保存文件会包含全部 ${export.text.length} 字符。"
+                        else "当前预览前 $previewLimit 字符，复制和保存会包含全部 ${export.text.length} 字符。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { previewLimit = (previewLimit + 8000).coerceAtMost(export.text.length) }) {
+                        Text("继续查看")
+                    }
+                }
             },
             onFailure = { Text(it.message ?: "暂时无法导出", color = MaterialTheme.colorScheme.error) },
         )

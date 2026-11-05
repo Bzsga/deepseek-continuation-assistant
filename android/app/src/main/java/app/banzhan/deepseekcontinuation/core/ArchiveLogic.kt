@@ -158,6 +158,9 @@ object ArchiveLogic {
         return ExportResult(text, omittedCount = 0, pinnedOverflow = false)
     }
 
+    fun continuationExport(archive: Archive, conversations: List<ImportedConversation>): ExportResult =
+        ContinuityLogic.export(archive, conversations)
+
     fun export(archive: Archive, maxCharacters: Int = 6000): ExportResult {
         require(maxCharacters >= 100) { "导出上限至少为 100 个字符。" }
         val entries = archive.entries.filter { !it.deleted && it.text.isNotBlank() }

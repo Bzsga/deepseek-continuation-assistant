@@ -3,6 +3,7 @@ package app.banzhan.deepseekcontinuation.data
 import app.banzhan.deepseekcontinuation.core.Archive
 import app.banzhan.deepseekcontinuation.core.ArchiveEntry
 import app.banzhan.deepseekcontinuation.core.ChatMessage
+import app.banzhan.deepseekcontinuation.core.ContinuityLogic
 import app.banzhan.deepseekcontinuation.core.ImportedConversation
 import java.util.Base64
 import kotlinx.serialization.decodeFromString
@@ -45,6 +46,7 @@ internal object BackupValidation {
             require(archive.title.isNotBlank() && archive.title.length <= 100_000 && archive.background.length <= 100_000) { "备份档案文字无效" }
             unique(archive.conversationIds, "档案会话引用")
             require(archive.conversationIds.all { it in conversations }) { "备份档案引用了不存在的会话" }
+            validateContinuity(archive, conversations.values.toList())
             val allowed = archive.conversationIds.flatMap { conversations.getValue(it).branches }.flatMap { it.messages }.map { it.id }.toSet()
             unique(archive.entries.map { it.id }, "档案条目")
             archive.entries.forEach { validateEntry(it, allowed) }
@@ -91,6 +93,13 @@ internal object BackupValidation {
             val entries = appJson.decodeFromString<List<ArchiveEntry>>(row.payload)
             SummaryProtocol.validateEntries(entries, messages.values.toList())
         }
+    }
+
+    internal fun validateContinuity(archive: Archive, conversations: List<ImportedConversation>) {
+        ContinuityLogic.validateSettings(archive.continuity)
+        ContinuityLogic.validateSourceScopes(archive.sourceScopes, conversations, archive.conversationIds.toSet())
+        // Legacy or stale fragment IDs are handled conservatively by buildPlan;
+        // they must not make an otherwise valid historical backup unreadable.
     }
 
     private fun unique(ids: List<String>, label: String) {

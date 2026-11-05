@@ -34,7 +34,7 @@
 
 ## 版本与签名
 
-当前 Android 为 1.0.3 / versionCode 12。自 1.0.1 起使用递增数字 `major.minor.patch`，每次发布递增 versionCode，至少推进 patch。设置页显示实际 BuildConfig 版本。桥接测试属性 `updateTestVersionCode` / `updateTestVersionName` 只用于本地升级验证，不作为正式发布版本。
+当前 Android 为 1.0.4 / versionCode 13。自 1.0.1 起使用递增数字 `major.minor.patch`，每次发布递增 versionCode，至少推进 patch。设置页显示实际 BuildConfig 版本。桥接测试属性 `updateTestVersionCode` / `updateTestVersionName` 只用于本地升级验证，不作为正式发布版本。
 
 `tools/verify_release.py` 调用 Android SDK 的 `apksigner` 与 `aapt2`，生成和 APK 哈希绑定的验证元数据。现有工具固定了原版包名与公开证书摘要；Fork 必须替换为自己的身份与证书，不能仅改清单跳过验签。私钥和密码不属于源码。
 

@@ -14,6 +14,8 @@ import app.banzhan.deepseekcontinuation.core.Archive
 import app.banzhan.deepseekcontinuation.core.ArchiveEntry
 import app.banzhan.deepseekcontinuation.core.ArchiveLogic
 import app.banzhan.deepseekcontinuation.core.ChatMessage
+import app.banzhan.deepseekcontinuation.core.ContinuityLogic
+import app.banzhan.deepseekcontinuation.core.ContinuitySettings
 import app.banzhan.deepseekcontinuation.core.DeepSeekImporter
 import app.banzhan.deepseekcontinuation.core.EntryConflict
 import app.banzhan.deepseekcontinuation.core.ImportedConversation
@@ -672,7 +674,9 @@ class AppController internal constructor(application: Application, databaseName:
             require(messages.isNotEmpty() || background.isNotBlank()) { "请选择对话消息或填写背景" }
             val entries = if (includeRawEntries) ArchiveLogic.localEntries(messages) else emptyList()
             val archive = Archive(UUID.randomUUID().toString(), title.trim(), listOf(source.id), entries,
-                background = background, generationMode = if (includeRawEntries) "original" else "summary")
+                background = background, generationMode = if (includeRawEntries) "original" else "summary",
+                continuity = ContinuitySettings(enabled = true),
+                sourceScopes = listOf(ContinuityLogic.captureScope(source, branchId, selectedIds)))
             saveArchive(archive, keepRevision = false)
             refresh()
             archive.id
@@ -688,7 +692,8 @@ class AppController internal constructor(application: Application, databaseName:
                 val messages = selectMessages(source, branchId, selectedIds)
                 require(messages.isNotEmpty()) { "请选择要加入的消息" }
                 val merged = ArchiveLogic.merge(archive.entries, ArchiveLogic.localEntries(messages))
-                saveArchive(archive.copy(conversationIds = (archive.conversationIds + source.id).distinct(), entries = merged.entries,
+                val scoped = withSelectedSourceScope(archive, source, branchId, selectedIds)
+                saveArchive(scoped.copy(conversationIds = (archive.conversationIds + source.id).distinct(), entries = merged.entries,
                     generationMode = if (archive.generationMode == "summary") "legacy" else archive.generationMode))
                 saveConflicts(archiveId, merged.conflicts)
             }
@@ -704,8 +709,12 @@ class AppController internal constructor(application: Application, databaseName:
             database.withTransaction {
                 val archive = loadArchive(archiveId)
                 require(entry.sourceIds.all { it in sourceIds(archive) }) { "条目引用了档案之外的消息" }
-                val updated = entry.copy(id = entry.id.ifBlank { UUID.randomUUID().toString() }, edited = true)
-                val previous = archive.entries.indexOfFirst { it.id == updated.id }
+                val id = entry.id.ifBlank { UUID.randomUUID().toString() }
+                val previous = archive.entries.indexOfFirst { it.id == id }
+                val original = archive.entries.getOrNull(previous)
+                val contentChanged = original == null || original.text != entry.text ||
+                    original.category != entry.category || original.kind != entry.kind || original.sourceIds != entry.sourceIds
+                val updated = entry.copy(id = id, edited = original?.edited == true || contentChanged)
                 val entries = archive.entries.toMutableList()
                 if (previous < 0) entries.add(updated) else entries[previous] = updated
                 saveArchive(archive.copy(entries = entries))
@@ -719,6 +728,23 @@ class AppController internal constructor(application: Application, databaseName:
         mutex.withLock {
             requireWritable()
             database.withTransaction { saveArchive(loadArchive(archiveId).copy(background = background)) }
+            refresh()
+        }
+    }
+
+    suspend fun saveContinuitySettings(archiveId: String, settings: ContinuitySettings) = operation {
+        val validated = ContinuityLogic.validateSettings(settings)
+        mutex.withLock {
+            requireWritable()
+            database.withTransaction {
+                val archive = loadArchive(archiveId)
+                if (!conversationCacheValid) refresh(reloadConversations = true)
+                val candidates = ContinuityLogic.buildPlan(archive, state.value.conversations)
+                    .recommendedFragments.map { it.id }.toSet()
+                require(validated.selectedFragmentIds?.all { it in candidates } != false) { "选中的互动片段已变化，请重新选择" }
+                // UI settings cannot replace sourceScopes or rebuild a running request.
+                saveArchive(archive.copy(continuity = validated))
+            }
             refresh()
         }
     }
@@ -793,7 +819,8 @@ class AppController internal constructor(application: Application, databaseName:
             val tasks = dao.tasks().map { it.decodeTask() }
             requireTaskSlot(archiveId, null, tasks)
             require(tasks.none { it.archiveId == archiveId && jobs[it.id]?.isCompleted == false }) { "旧任务正在停止，请稍后重试" }
-            val messages = selectMessages(storedConversation(conversationId), branchId, selectedIds)
+            val source = storedConversation(conversationId)
+            val messages = selectMessages(source, branchId, selectedIds)
             require(messages.isNotEmpty()) { "请选择要整理的消息" }
             require(state.value.settings == settingsSnapshot) { "服务设置已改变，请重新检查后开始。" }
             if (freeQuota != null) require(freeQuota.organizationBlocker() == null) { freeQuota.organizationBlocker().orEmpty() }
@@ -810,7 +837,11 @@ class AppController internal constructor(application: Application, databaseName:
             val task = TaskRecord(id, archiveId, archive.title, settings.withoutSecrets(), "task:$id", records,
                 message = estimateCost(settings, records))
             DiagnosticLog.record("task", "prepare", mapOf("chunk_count" to records.size.toLong()))
-            saveTask(task)
+            database.withTransaction {
+                val scoped = withSelectedSourceScope(archive, source, branchId, selectedIds)
+                if (scoped != archive) saveArchive(scoped)
+                saveTask(task)
+            }
             refresh()
             id
         }
@@ -1284,6 +1315,19 @@ class AppController internal constructor(application: Application, databaseName:
         return branch.messages.filter { it.id in selectedIds && it.content.isNotBlank() }
     }
 
+    private fun withSelectedSourceScope(
+        archive: Archive, conversation: ImportedConversation, branchId: String, selectedIds: Set<String>,
+    ): Archive {
+        val scopes = (archive.sourceScopes.ifEmpty {
+            ContinuityLogic.inferEntryScopes(archive, state.value.conversations)
+        }).toMutableList()
+        val index = scopes.indexOfFirst { it.conversationId == conversation.id && it.branchId == branchId }
+        val previousIds = if (index >= 0) scopes[index].selectedMessageIds else emptyList()
+        val selected = ContinuityLogic.captureScope(conversation, branchId, previousIds.toSet() + selectedIds)
+        if (index >= 0) scopes[index] = selected else scopes.add(selected)
+        return archive.copy(sourceScopes = scopes)
+    }
+
     private suspend fun sourceIds(archive: Archive): Set<String> {
         if (!conversationCacheValid) refresh(reloadConversations = true)
         return state.value.conversations.asSequence().filter { it.id in archive.conversationIds }
@@ -1296,6 +1340,8 @@ class AppController internal constructor(application: Application, databaseName:
     private suspend fun loadTask(id: String): TaskRecord = dao.task(id)?.decodeTask() ?: error("任务已不存在")
 
     private suspend fun saveArchive(archive: Archive, keepRevision: Boolean = true) {
+        if (!conversationCacheValid) refresh(reloadConversations = true)
+        BackupValidation.validateContinuity(archive, state.value.conversations)
         val previous = dao.archive(archive.id)
         if (keepRevision && previous != null) dao.put(RevisionRow(UUID.randomUUID().toString(), archive.id, System.currentTimeMillis(), previous.payload))
         val updated = archive.copy(updatedAt = System.currentTimeMillis())

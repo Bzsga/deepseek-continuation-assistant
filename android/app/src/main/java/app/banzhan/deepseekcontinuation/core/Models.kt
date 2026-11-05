@@ -58,6 +58,44 @@ data class Archive(
     val updatedAt: Long = System.currentTimeMillis(),
     val background: String = "",
     val generationMode: String = "legacy",
+    val continuity: ContinuitySettings = ContinuitySettings(),
+    val sourceScopes: List<ArchiveSourceScope> = emptyList(),
+)
+
+/** Exact selected branch/range; message bodies remain in the imported source store. */
+@Serializable
+data class ArchiveSourceScope(
+    val conversationId: String,
+    val branchId: String,
+    val selectedMessageIds: List<String>,
+)
+
+@Serializable
+data class ContinuitySettings(
+    val enabled: Boolean = false,
+    val includeRecent: Boolean = true,
+    val recentTurns: Int = 3,
+    // null follows the small default selection; an empty list selects no key fragments.
+    val selectedFragmentIds: List<String>? = null,
+    val interactionNotes: String = "",
+    val nextMessage: String = "",
+)
+
+data class ContinuityFragment(
+    val id: String,
+    val conversationId: String,
+    val branchId: String,
+    val title: String,
+    val messages: List<ChatMessage>,
+)
+
+data class ContinuityPlan(
+    val recentFragments: List<ContinuityFragment>,
+    val recommendedFragments: List<ContinuityFragment>,
+    val selectedFragmentIds: List<String>,
+    val includedFragmentIds: List<String>,
+    val notices: List<String>,
+    val export: ExportResult,
 )
 
 @Serializable

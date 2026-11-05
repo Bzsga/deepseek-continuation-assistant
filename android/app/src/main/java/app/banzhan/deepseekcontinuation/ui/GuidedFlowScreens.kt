@@ -601,18 +601,20 @@ internal fun OrganizationProgressScreen(
 internal fun ContinuationResultScreen(
     archive: Archive,
     task: OrganizationTask?,
+    conversations: List<ImportedConversation>,
+    onSaveContinuity: suspend (ContinuitySettings) -> Unit,
     onCopyAndOpen: (String) -> Unit,
     onSave: (String) -> Unit,
     onOpenDeepSeek: () -> Unit,
     onDetails: () -> Unit,
     onPrepare: () -> Unit,
 ) {
-    var export by remember(archive) { mutableStateOf<Result<ExportResult>?>(null) }
-    var large by remember(archive) { mutableStateOf(false) }
-    LaunchedEffect(archive) {
+    var export by remember(archive, conversations) { mutableStateOf<Result<ExportResult>?>(null) }
+    var large by remember(archive, conversations) { mutableStateOf(false) }
+    LaunchedEffect(archive, conversations) {
         val prepared =
             withContext(Dispatchers.Default) {
-                val result = runCatching { ArchiveLogic.continuationExport(archive) }
+                val result = runCatching { ArchiveLogic.continuationExport(archive, conversations) }
                 result to
                     ((result.getOrNull()?.text?.toByteArray(Charsets.UTF_8)?.size ?: 0) > 60 * 1024)
             }
@@ -642,6 +644,7 @@ internal fun ContinuationResultScreen(
             )
         }
         if (unfinished) item { NoticeCard("整理尚未完成，下面是目前已保存的内容。") }
+        item { ContinuitySetupCard(archive, conversations, onSaveContinuity) }
         if (export == null) {
             item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
         } else if (text == null) {

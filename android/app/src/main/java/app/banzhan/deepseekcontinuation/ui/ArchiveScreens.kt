@@ -112,6 +112,11 @@ internal fun ArchiveScreen(
             }
         }
         item {
+            ContinuitySetupCard(archive, state.conversations) { settings ->
+                controller.saveContinuitySettings(archive.id, settings)
+            }
+        }
+        item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
@@ -290,7 +295,7 @@ internal fun ArchiveScreen(
             entry.sourceIds.forEach { id ->
                 val message = allMessages[id]
                 if (message == null)
-                    Text("无法找到原文 · $id", style = MaterialTheme.typography.bodySmall)
+                    Text("无法找到这条消息的原文。", style = MaterialTheme.typography.bodySmall)
                 else {
                     Text(
                         roleLabel(message.role) + " · " + message.timestamp,
