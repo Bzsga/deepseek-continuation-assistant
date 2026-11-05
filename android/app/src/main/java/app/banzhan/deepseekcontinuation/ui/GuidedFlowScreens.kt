@@ -638,9 +638,15 @@ internal fun ContinuationResultScreen(
         export = prepared.first
     }
     var previewLimit by rememberSaveable(archive.id) { mutableIntStateOf(8000) }
+    var showMoreActions by rememberSaveable(archive.id) { mutableStateOf(false) }
     val text = export?.getOrNull()?.text
     val unfinished = task != null && task.status != "completed"
     val rebuiltCompleted = archive.rebuiltFromArchiveId != null && task?.status == "completed"
+    val hasReorganizationNavigation = archive.rebuiltFromArchiveId != null ||
+        archives.any { it.rebuiltFromArchiveId == archive.id }
+    val pendingOrganization = tasks.firstOrNull {
+        it.archiveId == archive.id && it.status in setOf("queued", "running", "paused")
+    } ?: task?.takeIf { it.status in setOf("queued", "running", "paused") }
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
@@ -679,13 +685,16 @@ internal fun ContinuationResultScreen(
             item {
                 if (rebuiltCompleted) Button(onClick = onDetails) { Text("查看详细内容与新建议") }
                 else Button(onClick = onPrepare) { Text("返回准备页") }
+                if (!rebuiltCompleted) {
+                    TextButton(onClick = onDetails) { Text("查看与修改详细内容") }
+                }
                 ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
             }
         } else {
             item {
                 if (archive.generationMode == "original")
                     Text(
-                        "这是完整原文，长度没有缩短。",
+                        "这是所选范围的原文，长度没有缩短。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -703,18 +712,43 @@ internal fun ContinuationResultScreen(
                             Text("复制并打开 DeepSeek")
                         }
                     if (!large) OutlinedButton(onClick = { onSave(text) }) { Text("保存续聊文件") }
-                    if (archive.generationMode == "summary") {
-                        OutlinedButton(onClick = onPoliticalExport, enabled = !busy) { Text("生成温和版") }
-                    }
-                    TextButton(onClick = onOpenDeepSeek) { Text("打开 DeepSeek") }
+                    if (large) OutlinedButton(onClick = onOpenDeepSeek) { Text("打开 DeepSeek") }
                 }
                 Text(
                     "新建对话 → 粘贴或添加文件 → 发送",
                     style = MaterialTheme.typography.bodySmall,
                     color = Blue,
                 )
-                ContinuitySetupCard(archive, conversations, onSaveContinuity)
-                ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
+                if ((export?.getOrNull()?.omittedCount ?: 0) > 0) {
+                    Text("已优先携带互动与近期内容，${export?.getOrNull()?.omittedCount} 条自动内容仍保留在原档案。",
+                        style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = onDetails) { Text("查看完整档案") }
+                }
+                pendingOrganization?.let { pending ->
+                    TextButton(onClick = { onOpenRecord(archive.id) }, enabled = !busy) {
+                        Text(if (pending.status == "paused") "继续上次整理" else "查看整理进度")
+                    }
+                }
+                if (hasReorganizationNavigation) {
+                    ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
+                }
+                TextButton(onClick = { showMoreActions = !showMoreActions }) {
+                    Icon(if (showMoreActions) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        null, Modifier.size(18.dp))
+                    Text(if (showMoreActions) "收起更多选项" else "调整与更多")
+                }
+                if (showMoreActions) {
+                    ContinuitySetupCard(archive, conversations, onSaveContinuity)
+                    ActionRow {
+                        if (archive.generationMode == "summary") {
+                            OutlinedButton(onClick = onPoliticalExport, enabled = !busy) { Text("生成温和版") }
+                        }
+                        TextButton(onClick = onDetails) { Text("查看与修改详细内容") }
+                    }
+                    if (!hasReorganizationNavigation && pendingOrganization == null) {
+                        ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
+                    }
+                }
             }
             item {
                 Surface(shape = MaterialTheme.shapes.medium) {
@@ -722,7 +756,7 @@ internal fun ContinuationResultScreen(
                         Modifier.fillMaxWidth().padding(18.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Text("内容预览", fontWeight = FontWeight.SemiBold)
+                        Text("当前续聊版本预览", fontWeight = FontWeight.SemiBold)
                         SelectionContainer {
                             Text(
                                 text.take(previewLimit),
@@ -731,7 +765,7 @@ internal fun ContinuationResultScreen(
                         }
                         if (text.length > previewLimit) {
                             Text(
-                                "当前预览前 $previewLimit 字符，复制和保存会包含全部 ${text.length} 字符。",
+                                "当前预览前 $previewLimit 字符，复制和保存包含此续聊版本的全部 ${text.length} 字符。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -747,6 +781,5 @@ internal fun ContinuationResultScreen(
                 }
             }
         }
-        item { TextButton(onClick = onDetails) { Text("查看与修改详细内容") } }
     }
 }

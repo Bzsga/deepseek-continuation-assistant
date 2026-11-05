@@ -1,6 +1,6 @@
 # 构建与安装
 
-源码版本见 `android/app/build.gradle.kts`。当前 Android 源码为 1.0.8 / versionCode 17，最低 Android 8.0（API 26），compile/target SDK 为 35。
+源码版本见 `android/app/build.gradle.kts`。当前 Android 源码为 1.0.9 / versionCode 18，最低 Android 8.0（API 26），compile/target SDK 为 35。
 
 ## Android 环境
 
@@ -23,7 +23,7 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
 已有不同签名的同包名应用不能被此包覆盖。保留原版数据时，应先备份，或为开发版本设置不同 applicationId 后并行安装。
 
-备份恢复需使用兼容版本：1.0.8 写出格式 5，需用 1.0.8 或更新版本恢复；当前源码读取格式 1–5。交流方式、原话选择、重新整理和手动修改保护规则见[续聊功能说明](conversation-continuity.md)。
+备份恢复需使用兼容版本：1.0.9 继续写出格式 5，需用 1.0.8 或更新版本恢复；当前源码读取格式 1–5。交流方式、原话选择、重新整理和手动修改保护规则见[续聊功能说明](conversation-continuity.md)。
 
 PowerShell 也可使用仓库脚本；尖括号为需要替换的工具路径：
 
@@ -76,8 +76,10 @@ python -m venv .venv
 python -m unittest discover -s tools/tests -p test_publish_release.py
 ```
 
-本轮增加长文来源、任务恢复、备份及独立政治议题筛查的定点检查。`PoliticalExportUiTest` 用当前设备的合成检查快照验证长预览、导出按钮、误判保留与未完成状态；它拒绝覆盖已有检查记录，不调用模型。设备测试应使用独立 QA 环境，不能运行到存有真实资料的日常安装上。
+1.0.9 已通过 73 项定点 JVM 检查，覆盖代表互动选择、来源停点、自然句段节选和摘要携带预算等受影响行为；7 项 Android 11 / API 30 界面检查使用 320dp、1.2 倍字体的模拟器和合成资料。正式 Release 构建、lintRelease、原证书验签和 1.0.8/code17 → 1.0.9/code18 覆盖升级冷启动通过，首次安装记录保持。两次固定虚构资料的模型对照均返回 HTTP 502，未取得有效输出或用量数据，不能据此宣称续聊体验改善。
 
-1.0.8 正式 Release 构建、lintRelease 和原证书验签通过，Android 11 / API 30 模拟器上的 1.0.7 → 1.0.8 覆盖安装与冷启动通过。没有实体手机覆盖结论。
+此前的 `PoliticalExportUiTest` 用当前设备的合成检查快照验证长预览、导出按钮、误判保留与未完成状态；它拒绝覆盖已有检查记录，不调用模型。设备测试应使用独立 QA 环境，不能运行到存有真实资料的日常安装上。
+
+历史 1.0.8 正式 Release 构建、lintRelease 和原证书验签通过，Android 11 / API 30 模拟器上的 1.0.7 → 1.0.8 覆盖安装与冷启动通过。没有实体手机覆盖结论。
 
 本页提供构建与测试命令，实际验证结果见 [README](../README.md#验证状态与局限) 及已发布版本的 Release 记录；历史测试不代表本轮重新执行所有平台与场景。

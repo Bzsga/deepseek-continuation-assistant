@@ -134,7 +134,7 @@ internal fun ContinuityEditor(
             }
         },
     ) {
-        Text("优先衔接交流方式，保留记忆与最近对话。",
+        Text("衔接交流方式、关键记忆与最近对话。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(

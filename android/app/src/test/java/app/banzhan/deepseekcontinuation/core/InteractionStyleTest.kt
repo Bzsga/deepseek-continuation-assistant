@@ -20,10 +20,20 @@ class InteractionStyleTest {
                 interactionNotes = "当前要求：今天直接回答，不要先复述。", nextMessage = "接下来：我想先说结尾。"))
         val plan = ContinuityLogic.buildPlan(source, listOf(conversation))
         val text = plan.export.text
-        val ordered = listOf(source.continuity.interactionNotes, preference.text, correction.text, shared.text, style.text,
+        val ordered = listOf(source.continuity.interactionNotes, style.text,
             open.text, fact.text, "【原文片段", source.continuity.nextMessage)
         assertTrue(ordered.all { text.contains(it) })
         assertTrue(ordered.map { text.indexOf(it) }.zipWithNext().all { (first, second) -> first < second })
+        // Corrections now have their own change-record section. Preserve their
+        // source labels and priority over observations without imposing a false
+        // single chronology across the independent cue sections.
+        for (cue in listOf(preference, correction, shared)) {
+            assertTrue(text.indexOf(source.continuity.interactionNotes) < text.indexOf(cue.text))
+            assertTrue(text.indexOf(cue.text) < text.indexOf(style.text))
+        }
+        assertTrue(text.contains("【明确修正与变化】"))
+        assertTrue(text.indexOf("【明确修正与变化】") < text.indexOf(correction.text))
+        assertTrue(text.contains("明确修正 · 接下来要聊的事 · 用户陈述 · 来源角色：用户 · 第3条"))
         source.entries.forEach { assertEquals(1, Regex(Regex.escape(it.text)).findAll(text).count()) }
         assertEquals(1, plan.responseStyleCount)
         assertTrue(text.contains("回应方式观察（非用户要求）"))

@@ -58,12 +58,22 @@ class ContinuityPresentationTest {
         assertEquals(listOf("u0", "u1", "u3"), result.entries.single().sourceIds)
     }
 
-    @Test fun unfinishedTopicPrecedesLongDetailsButKeepsHistoricalStatus() {
+    @Test fun unfinishedTopicKeepsHistoricalStatusAndFullMemoryRestoresBudgetedDetails() {
         val open = entry("open", "u0")
         val detail = entry("detail", "u1").copy(text = "完整主题资料。".repeat(4000), continuityCue = null)
-        val plan = ContinuityLogic.buildPlan(archive(listOf(detail, open)), listOf(conversation))
-        assertTrue(plan.export.text.indexOf(open.text) < plan.export.text.indexOf(detail.text))
-        assertTrue(plan.export.text.contains(detail.text))
-        assertTrue(plan.export.text.contains("不把早期的待定状态自动视为现在仍未解决"))
+        val source = archive(listOf(detail, open))
+        val plan = ContinuityLogic.buildPlan(source, listOf(conversation))
+        assertTrue(plan.export.text.contains(open.text))
+        assertFalse(plan.export.text.contains(detail.text))
+        assertEquals(1, plan.export.omittedCount)
+        assertTrue(plan.export.text.contains("完整条目仍在原档案"))
+        val full = ContinuityLogic.buildPlan(source, listOf(conversation), includeAllMemory = true)
+        assertTrue(full.export.text.contains(detail.text))
+        assertTrue(full.export.text.indexOf(open.text) < full.export.text.indexOf(detail.text))
+        assertEquals(0, full.export.omittedCount)
+        for (result in listOf(plan, full)) {
+            assertTrue(result.export.text.contains("不把早期待定事项自动当成现在仍未解决"))
+        }
+        assertEquals(listOf(detail, open), source.entries)
     }
 }

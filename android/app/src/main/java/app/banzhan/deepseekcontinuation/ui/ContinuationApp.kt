@@ -23,6 +23,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -1181,16 +1182,19 @@ private fun ExportDialog(
     onSave: (String) -> Unit,
     onShare: (String) -> Unit,
 ) {
-    var result by remember(archive, conversations) { mutableStateOf<Result<ExportResult>?>(null) }
+    var includeAllMemory by rememberSaveable(archive.id) { mutableStateOf(false) }
+    var hasReducedMemory by remember(archive, conversations) { mutableStateOf(false) }
+    var result by remember(archive, conversations, includeAllMemory) { mutableStateOf<Result<ExportResult>?>(null) }
     var large by remember(archive, conversations) { mutableStateOf(false) }
     var previewLimit by rememberSaveable(archive.id) { mutableIntStateOf(8000) }
-    LaunchedEffect(archive, conversations) {
+    LaunchedEffect(archive, conversations, includeAllMemory) {
         val prepared = withContext(Dispatchers.Default) {
-            val export = runCatching { ArchiveLogic.continuationExport(archive, conversations) }
+            val export = runCatching { ContinuityLogic.export(archive, conversations, includeAllMemory = includeAllMemory) }
             export to ((export.getOrNull()?.text?.toByteArray(Charsets.UTF_8)?.size ?: 0) > 60 * 1024)
         }
         large = prepared.second
         result = prepared.first
+        if (!includeAllMemory) hasReducedMemory = (prepared.first.getOrNull()?.omittedCount ?: 0) > 0
     }
     AppDialog(
         "带到下一段对话",
@@ -1202,7 +1206,7 @@ private fun ExportDialog(
                     if (large) {
                         Button(onClick = { onSave(export.text) }) { Text("保存文件") }
                     } else {
-                        Button(onClick = { onCopy(export.text) }) { Text("复制 Markdown") }
+                        Button(onClick = { onCopy(export.text) }) { Text("复制续聊内容") }
                         OutlinedButton(onClick = { onSave(export.text) }) { Text("保存文件") }
                         TextButton(onClick = { onShare(export.text) }) { Text("系统分享") }
                     }
@@ -1211,6 +1215,13 @@ private fun ExportDialog(
         },
     ) {
         ContinuitySetupCard(archive, conversations, onSaveContinuity)
+        if (hasReducedMemory || includeAllMemory) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = includeAllMemory, onCheckedChange = { includeAllMemory = it })
+                Text("带上全部记忆", style = MaterialTheme.typography.bodyMedium)
+            }
+            Text("仍遵循已保存的续聊设置；内容较多时可保存文件。", style = MaterialTheme.typography.bodySmall)
+        }
         if (result == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         result?.fold(
             onSuccess = { export ->
@@ -1219,6 +1230,8 @@ private fun ExportDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = Blue,
                 )
+                if (export.omittedCount > 0) Text("本次未附带 ${export.omittedCount} 条自动内容，原档案仍完整保留。",
+                    style = MaterialTheme.typography.bodySmall)
                 if (export.pinnedOverflow)
                     Text(
                         "部分固定条目未被带入，请核对预览。",

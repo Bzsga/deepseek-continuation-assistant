@@ -86,7 +86,7 @@ class ContinuityLogicTest {
         assertEquals(plan.recentFragments.map { it.id }.toSet(), onlyRecent.includedFragmentIds.toSet())
     }
 
-    @Test fun longFactsDoNotDisplaceRecentDialogueAndOversizedQuotesAreSkippedWhole() {
+    @Test fun longFactsDoNotDisplaceRecentDialogueAndOversizedRecentQuotesUseMarkedExcerpts() {
         val conversation = conversation(1)
         val background = "需要完整保留的事实。".repeat(3500)
         val base = archive(conversation).copy(background = background)
@@ -98,12 +98,16 @@ class ContinuityLogicTest {
         assertTrue(plan.notices.any { it.contains("保存为文件") })
         val huge = conversation.copy(branches = listOf(conversation.branches.single().copy(messages = listOf(
             ChatMessage("u0", "user", "😀完整原话\n".repeat(1000)), ChatMessage("a0", "assistant", "对应完整回复")))))
-        val skipped = ContinuityLogic.buildPlan(base, listOf(huge), maxCharacters = 1200)
-        assertTrue(skipped.includedFragmentIds.isEmpty())
-        assertTrue(skipped.export.text.contains(background))
-        assertFalse(skipped.export.text.contains("😀"))
-        assertTrue(skipped.notices.any { it.contains("未截断原话") })
-        assertEquals(huge.branches.single().messages, skipped.recentFragments.single().messages)
+        val excerpted = ContinuityLogic.buildPlan(base, listOf(huge), maxCharacters = 1200)
+        assertEquals(1, excerpted.includedFragmentIds.size)
+        assertTrue(excerpted.export.text.contains(background))
+        assertTrue(excerpted.export.text.contains("> 😀完整原话\n"))
+        assertTrue(excerpted.export.text.contains("对应完整回复"))
+        assertTrue(excerpted.export.text.contains("【原文节选"))
+        assertTrue(excerpted.export.text.contains("〔节选说明：省略中间部分原文〕"))
+        assertTrue(Regex(Regex.escape("> 😀完整原话\n")).findAll(excerpted.export.text).count() in 1..999)
+        assertTrue(excerpted.notices.any { it.contains("完整原文仍在本机") })
+        assertEquals(huge.branches.single().messages, excerpted.recentFragments.single().messages)
     }
 
     @Test fun sharedQuestionWithDivergentAnswersNeverGetsSplicedAcrossBranches() {
@@ -132,7 +136,7 @@ class ContinuityLogicTest {
         val base = archive(conversation).copy(entries = entries, generationMode = "original",
             continuity = ContinuitySettings(enabled = true, interactionNotes = "先听我说完。"))
         val result = ContinuityLogic.buildPlan(base, listOf(conversation)).export.text
-        assertTrue(result.contains(ArchiveLogic.continuationExport(base).text))
+        assertTrue(result.contains(ArchiveLogic.continuationExport(base, includeGuidance = false).text))
         assertEquals(1, Regex("原始问题").findAll(result).count())
         assertTrue(result.contains("修订后的最后一句"))
         assertFalse(result.contains("旧的最后一句"))
@@ -208,7 +212,7 @@ class ContinuityLogicTest {
             continuity = ContinuitySettings(enabled = true, includeRecent = false, selectedFragmentIds = emptyList()))
         val text = ContinuityLogic.export(base, listOf(conversation)).text
         assertFalse(text.contains("【自动交流线索】"))
-        assertTrue(text.contains(ArchiveLogic.continuationExport(base).text))
+        assertTrue(text.contains(ArchiveLogic.continuationExport(base, includeGuidance = false).text))
         entries.forEach { assertEquals(1, Regex(Regex.escape(it.text)).findAll(text).count()) }
     }
 

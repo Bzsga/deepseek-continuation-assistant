@@ -245,7 +245,7 @@ object ArchiveLogic {
         return MergeResult(entries.values.toList(), conflicts.distinct())
     }
 
-    fun continuationExport(archive: Archive): ExportResult {
+    fun continuationExport(archive: Archive, includeGuidance: Boolean = true): ExportResult {
         val entries = archive.entries.filter { !it.deleted && it.text.isNotBlank() }
         val background = archive.background.takeIf { it.isNotBlank() }
         require(entries.isNotEmpty() || background != null) { "没有可用于续聊的内容，请先添加聊天内容或背景。" }
@@ -263,9 +263,11 @@ object ArchiveLogic {
             EntryCategory.QUOTES to "重要原话",
         )
         val text = buildString {
-            append("请沿用下面的背景、讨论过的观点和最近进展，继续与我交流，并以我后续的纠正为准。")
-            append("仅在出现真实矛盾、涉及重要决定或信息明确未定时向我核实。")
-            append("讨论中的建议和理解沿用原有语气，个人经历、病史、承诺和已采取的行动以我的明确陈述为依据。\n\n")
+            if (includeGuidance) {
+                append("请沿用下面的背景、讨论过的观点和最近进展，继续与我交流，并以我后续的纠正为准。")
+                append("仅在出现真实矛盾、涉及重要决定或信息明确未定时向我核实。")
+                append("讨论中的建议和理解沿用原有语气，个人经历、病史、承诺和已采取的行动以我的明确陈述为依据。\n\n")
+            }
             append("【$contentLabel】${archive.title}\n")
             if (archive.generationMode == "original") {
                 append("聊天原文仅包含我所选的内容。\n")

@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -62,6 +63,16 @@ internal fun ArchiveScreen(
     var pendingRestore by remember { mutableStateOf<Archive?>(null) }
     var conflicts by remember { mutableStateOf<List<EntryConflict>?>(null) }
     var chooseConversation by remember { mutableStateOf(false) }
+    var showMoreActions by rememberSaveable(archive.id) { mutableStateOf(false) }
+    val politicalState by controller.politicalExport.state.collectAsState()
+    val continuingPoliticalTask = politicalState.task?.takeIf {
+        it.archiveId == archive.id && (it.canResume || it.status in setOf("queued", "running"))
+    }
+    val hasReorganizationNavigation = archive.rebuiltFromArchiveId != null ||
+        state.archives.any { it.rebuiltFromArchiveId == archive.id }
+    val pendingOrganization = state.tasks.firstOrNull {
+        it.archiveId == archive.id && it.status in setOf("queued", "running", "paused")
+    }
     val entries = archive.entries.filterNot { it.deleted }.sortedByDescending { it.pinned }
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -84,16 +95,6 @@ internal fun ArchiveScreen(
                     Spacer(Modifier.width(6.dp))
                     Text("导出续聊")
                 }
-                if (archive.generationMode == "summary" &&
-                    (entries.any { it.text.isNotBlank() } || archive.background.isNotBlank())) {
-                    OutlinedButton(onClick = onPoliticalExport) { Text("生成温和版") }
-                }
-                OutlinedButton(onClick = { chooseConversation = true }) {
-                    Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
-                    Text("关联对话")
-                }
-            }
-            ActionRow {
                 TextButton(
                     onClick = {
                         editEntry =
@@ -110,24 +111,56 @@ internal fun ArchiveScreen(
                     Spacer(Modifier.width(5.dp))
                     Text("补充条目")
                 }
-                TextButton(onClick = { run { history = controller.revisions(archive.id) } }) {
-                    Icon(Icons.Outlined.History, null, Modifier.size(17.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("历史版本")
-                }
+            }
+            ActionRow {
                 TextButton(onClick = { run { conflicts = controller.conflicts(archive.id) } }) {
                     Text("核对冲突")
                 }
+                continuingPoliticalTask?.let { pending ->
+                    TextButton(onClick = onPoliticalExport, enabled = !state.busy) {
+                        Text(if (pending.canResume) "继续温和版检查" else "查看温和版进度")
+                    }
+                }
+                TextButton(onClick = { showMoreActions = !showMoreActions }) {
+                    Icon(if (showMoreActions) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        null, Modifier.size(18.dp))
+                    Text(if (showMoreActions) "收起更多操作" else "更多操作")
+                }
             }
-        }
-        item {
-            ArchiveReorganizationActions(
-                archive, state.archives, state.tasks, state.busy, onReorganize, onOpenRecord,
-            )
-        }
-        item {
-            ContinuitySetupCard(archive, state.conversations) { settings ->
-                controller.saveContinuitySettings(archive.id, settings)
+            pendingOrganization?.let { pending ->
+                TextButton(onClick = { onOpenRecord(archive.id) }, enabled = !state.busy) {
+                    Text(if (pending.status == "paused") "继续上次整理" else "查看整理进度")
+                }
+            }
+            if (hasReorganizationNavigation) {
+                ArchiveReorganizationActions(
+                    archive, state.archives, state.tasks, state.busy, onReorganize, onOpenRecord,
+                )
+            }
+            if (showMoreActions) {
+                ContinuitySetupCard(archive, state.conversations) { settings ->
+                    controller.saveContinuitySettings(archive.id, settings)
+                }
+                ActionRow {
+                    if (continuingPoliticalTask == null && archive.generationMode == "summary" &&
+                        (entries.any { it.text.isNotBlank() } || archive.background.isNotBlank())) {
+                        OutlinedButton(onClick = onPoliticalExport, enabled = !state.busy) { Text("生成温和版") }
+                    }
+                    TextButton(onClick = { chooseConversation = true }) {
+                        Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
+                        Text("关联对话")
+                    }
+                    TextButton(onClick = { run { history = controller.revisions(archive.id) } }) {
+                        Icon(Icons.Outlined.History, null, Modifier.size(17.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("历史版本")
+                    }
+                }
+                if (!hasReorganizationNavigation && pendingOrganization == null) {
+                    ArchiveReorganizationActions(
+                        archive, state.archives, state.tasks, state.busy, onReorganize, onOpenRecord,
+                    )
+                }
             }
         }
         item {
