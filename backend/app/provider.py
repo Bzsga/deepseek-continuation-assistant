@@ -69,6 +69,8 @@ JSON_PROBE_MAX_CHARS = 65_536
 JSON_PROBE_MAX_DEPTH = 64
 JSON_PROBE_MAX_ATTEMPTS = 8
 JSON_PROBE_MAX_CANDIDATES = 2
+JSON_KEY_QUOTE_FIELDS = frozenset({"entries", "category", "text", "sourceIds", "kind", "continuityCue"})
+JSON_MAX_KEY_QUOTE_REPAIRS = 40
 
 
 class ProtocolError(ValueError):
@@ -201,7 +203,8 @@ def parse_generated_document(content, *, warnings=None, diagnostic_out=None):
     body, removed, had_bom = strip_json_edge_format(body)
     diagnostic = {"json_wrapper": "plain", "json_has_bom": had_bom,
                   "json_first_char": first_kind, "json_invisible_prefix": first_kind in {"format", "control"},
-                  "json_edge_format_removed": removed, "json_identical_duplicates": False}
+                  "json_edge_format_removed": removed, "json_identical_duplicates": False,
+                  "json_missing_key_quote": False}
 
     def fail(info):
         safe = {**diagnostic, "json_chars": len(body), **json_candidate_diagnostics(body), **info}
@@ -223,18 +226,31 @@ def parse_generated_document(content, *, warnings=None, diagnostic_out=None):
         body, inside_removed, inside_bom = strip_json_edge_format(inner_body)
         diagnostic["json_has_bom"] |= inside_bom
         diagnostic["json_edge_format_removed"] |= inside_removed
-    diagnostic["json_chars"] = len(body)
     parsed_warnings = set()
-    try:
-        document = json.loads(body, object_pairs_hook=lambda pairs: _unique_json_pairs(pairs, warnings=parsed_warnings),
-                              parse_float=_exact_json_float, parse_constant=_reject_json_constant)
-    except json.JSONDecodeError as error:
-        fail(json_error_diagnostics(error))
-    except ProtocolError as error:
-        fail(error.diagnostic)
-    except (ValueError, RecursionError):
-        fail({"json_error_type": "parser_limit"})
+    for quote_repairs in range(JSON_MAX_KEY_QUOTE_REPAIRS + 1):
+        parsed_warnings.clear()
+        try:
+            document = json.loads(body, object_pairs_hook=lambda pairs: _unique_json_pairs(pairs, warnings=parsed_warnings),
+                                  parse_float=_exact_json_float, parse_constant=_reject_json_constant)
+        except json.JSONDecodeError as error:
+            # Only the strict parser's object-key position may gain one quote.
+            # Never search/replace inside values or guess arbitrary field names.
+            if (quote_repairs < JSON_MAX_KEY_QUOTE_REPAIRS
+                    and error.msg == "Expecting property name enclosed in double quotes"
+                    and any(body.startswith(field + '\":', error.pos) for field in JSON_KEY_QUOTE_FIELDS)):
+                body = body[:error.pos] + '\"' + body[error.pos:]
+                continue
+            fail(json_error_diagnostics(error))
+        except ProtocolError as error:
+            fail(error.diagnostic)
+        except (ValueError, RecursionError):
+            fail({"json_error_type": "parser_limit"})
+        break
+    diagnostic["json_chars"] = len(body)
     diagnostic["json_identical_duplicates"] = "json_identical_duplicates" in parsed_warnings
+    diagnostic["json_missing_key_quote"] = quote_repairs > 0
+    if quote_repairs:
+        parsed_warnings.add("json_missing_key_quote")
     if diagnostic_out is not None:
         diagnostic_out.update(diagnostic)
     if diagnostic["json_edge_format_removed"] and warnings is not None:
@@ -906,6 +922,8 @@ async def _organize(settings: Settings, snapshot, messages, trace):
             message += "已清除回复边缘的格式标记，JSON 正文未改写。"
         if "json_identical_duplicates" in warnings:
             message += "已合并回复中值与类型一致的重复字段，正文与来源均已保留。"
+        if "json_missing_key_quote" in warnings:
+            message += "已补全回复字段名缺失的引号，正文与来源均已保留。"
         if "schema_normalized" in warnings:
             message += "已兼容整理结果的结构写法，正文与来源均已保留。"
         if "defaulted_category" in warnings:

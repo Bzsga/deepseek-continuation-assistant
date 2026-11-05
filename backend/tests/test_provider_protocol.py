@@ -12,7 +12,7 @@ import pytest
 from app.config import Settings
 from app.failure_artifacts import NETWORK_EVENTS, ProviderTrace
 from app.provider import (
-    ProtocolError, json_candidate_diagnostics, normalize_entries, organize, parse_generated_document,
+    JSON_MAX_KEY_QUOTE_REPAIRS, ProtocolError, json_candidate_diagnostics, normalize_entries, organize, parse_generated_document,
     provider_messages, snapshot_for, source_aliases,
 )
 
@@ -611,6 +611,100 @@ def test_nested_conflicts_and_later_syntax_errors_do_not_emit_successful_dedupli
         with pytest.raises(ProtocolError):
             parse_generated_document(content, warnings=warnings)
         assert warnings == set()
+
+
+def test_missing_known_key_opening_quotes_in_ten_entries_preserve_strings_sources_and_usage(
+        settings, messages, monkeypatch):
+    texts = [PRIVATE_MARKER + f"-{index} " + 'sourceIds":["m1"]' for index in range(10)]
+    rows = [json.dumps(entry(["m1"], "USER_FACT", text=text)).replace('"sourceIds":', 'sourceIds":')
+            for text in texts]
+    requests = mock_http(monkeypatch, envelope('{"entries":[' + ",".join(rows) + "]}"))
+    outcome = execute(settings, messages)
+    assert outcome.status == "completed" and [row["text"] for row in outcome.entries] == texts
+    assert all(row["sourceIds"] == [messages[0]["id"]] and row["kind"] == "USER_FACT"
+               for row in outcome.entries)
+    assert "[json_missing_key_quote]" in outcome.message
+    info = json.loads(outcome.message.split(" diagnostic=", 1)[1])
+    assert info["json_missing_key_quote"] is True and info["json_identical_duplicates"] is False
+    assert PRIVATE_MARKER not in outcome.message and settings.api_key not in outcome.message
+    assert outcome.usage_known and outcome.cost_micros == 840 and len(requests) == 1
+
+
+def test_valid_strings_with_key_like_text_are_never_repaired():
+    text = 'sourceIds":["m1"], text":"literal" {entries":[]}'
+    warnings, diagnostic = set(), {}
+    parsed = parse_generated_document(document([entry(text=text)]), warnings=warnings, diagnostic_out=diagnostic)
+    assert parsed["entries"][0]["text"] == text
+    assert warnings == set() and diagnostic["json_missing_key_quote"] is False
+
+
+@pytest.mark.parametrize("content", [
+    '{"entries":[],' + PRIVATE_MARKER + '":0}',
+    '{"entries":[],source_ids":["m1"]}',
+    '{"entries":[],sourceIdsExtra":["m1"]}',
+    '{"entries":[],sourceIds:["m1"]}',
+    '{"entries":sourceIds":["m1"]}',
+    '{"entries":[sourceIds":["m1"]]}',
+    'sourceIds":["m1"]',
+    '{"entries":[] sourceIds":["m1"]}',
+    '{"entries":[],sourceIds":[],"kind" "UNCONFIRMED"}',
+    '{"entries":[],sourceIds":[],"unused":NaN}',
+])
+def test_key_quote_repair_rejects_unknown_fields_wrong_positions_and_other_syntax(content):
+    warnings = set()
+    with pytest.raises(ProtocolError) as caught:
+        parse_generated_document(content, warnings=warnings)
+    assert caught.value.code == "json" and warnings == set()
+    assert caught.value.diagnostic["json_missing_key_quote"] is False
+    assert caught.value.diagnostic["json_identical_duplicates"] is False
+    assert PRIVATE_MARKER not in repr(caught.value.diagnostic)
+
+
+def test_missing_key_quote_repair_budget_is_finite_and_only_success_emits_warning():
+    for count in (JSON_MAX_KEY_QUOTE_REPAIRS, JSON_MAX_KEY_QUOTE_REPAIRS + 1):
+        content = '{"entries":[' + ",".join('{sourceIds":[]}' for _ in range(count)) + "]}"
+        warnings, diagnostic = set(), {}
+        if count == JSON_MAX_KEY_QUOTE_REPAIRS:
+            parsed = parse_generated_document(content, warnings=warnings, diagnostic_out=diagnostic)
+            assert len(parsed["entries"]) == count
+            assert warnings == {"json_missing_key_quote"} and diagnostic["json_missing_key_quote"] is True
+        else:
+            with pytest.raises(ProtocolError) as caught:
+                parse_generated_document(content, warnings=warnings, diagnostic_out=diagnostic)
+            assert caught.value.diagnostic["json_error_type"] == "expected_property"
+            assert caught.value.diagnostic["json_missing_key_quote"] is False
+            assert warnings == set() and diagnostic == {}
+
+
+@pytest.mark.parametrize("sources,expected", [('["m1"]', "completed"), ('["m2"]', "failed")])
+def test_key_quote_repair_preserves_identical_duplicate_compatibility_and_conflict_rejection(
+        settings, messages, monkeypatch, sources, expected):
+    row = json.dumps(entry(["m1"], "USER_FACT"))
+    content = '{"entries":[' + row[:-1] + ',sourceIds":' + sources + "}]}"
+    requests = mock_http(monkeypatch, envelope(content))
+    outcome = execute(settings, messages)
+    assert outcome.status == expected and outcome.usage_known and outcome.cost_micros == 840 and len(requests) == 1
+    info = json.loads(outcome.message.split(" diagnostic=", 1)[1])
+    if expected == "completed":
+        assert outcome.entries[0]["sourceIds"] == [messages[0]["id"]]
+        assert info["json_missing_key_quote"] is True and info["json_identical_duplicates"] is True
+        assert "[json_missing_key_quote]" in outcome.message and "[json_identical_duplicates]" in outcome.message
+    else:
+        assert info["json_error_type"] == "duplicate_key" and outcome.entries == []
+        assert info["json_missing_key_quote"] is False and info["json_identical_duplicates"] is False
+        assert "[json_missing_key_quote]" not in outcome.message
+
+
+@pytest.mark.parametrize("field,value,expected", [
+    ("sourceIds", ["m999"], "unknown_source"), ("kind", 123, "schema"),
+])
+def test_key_quote_repair_never_bypasses_sources_or_field_types(settings, messages, monkeypatch, field, value, expected):
+    content = document([entry(**{field: value})]).replace(json.dumps(field) + ":", field + '\":')
+    requests = mock_http(monkeypatch, envelope(content))
+    outcome = execute(settings, messages)
+    assert outcome.status == "failed" and f"[{expected}]" in outcome.message and outcome.entries == []
+    assert "[json_missing_key_quote]" not in outcome.message
+    assert outcome.usage_known and outcome.cost_micros == 840 and len(requests) == 1
 
 
 @pytest.mark.parametrize("change,expected", [({"sourceIds": ["m999"]}, "unknown_source"),

@@ -98,6 +98,7 @@ def safe_diagnostic(value):
     for name in ("has_error", "has_refusal", "has_reasoning", "json_has_bom", "body_read_complete",
                  "json_invisible_prefix", "json_edge_format_removed", "json_has_object_candidate",
                  "json_has_array_candidate", "json_scan_limited", "schema_normalized", "json_identical_duplicates",
+                 "json_missing_key_quote",
                  "request_sent", "response_headers_received"):
         if type(value.get(name)) is bool:
             result[name] = value[name]
