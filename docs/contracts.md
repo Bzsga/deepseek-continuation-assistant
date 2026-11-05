@@ -10,8 +10,11 @@ Android namespace `app.banzhan.deepseekcontinuation`. Domain uses kotlinx.serial
 data class ImportResult(val conversations:List<ImportedConversation>, val warnings:List<String>)
 enum class EntryCategory { BACKGROUND, PEOPLE, DECISIONS, RECENT, QUOTES }
 enum class EntryKind { USER_FACT, ASSISTANT_SUGGESTION, UNCONFIRMED }
-@Serializable data class ArchiveEntry(val id:String, val category:EntryCategory, val text:String, val sourceIds:List<String> = emptyList(), val kind:EntryKind=EntryKind.UNCONFIRMED, val pinned:Boolean=false, val edited:Boolean=false, val deleted:Boolean=false)
-@Serializable data class Archive(val id:String, val title:String, val conversationIds:List<String>, val entries:List<ArchiveEntry>, val updatedAt:Long=System.currentTimeMillis(), val background:String="", val generationMode:String="legacy")
+enum class ContinuityCue { PREFERENCE, CORRECTION, SHARED_LANGUAGE, OPEN_THREAD }
+@Serializable data class ArchiveEntry(val id:String, val category:EntryCategory, val text:String, val sourceIds:List<String> = emptyList(), val kind:EntryKind=EntryKind.UNCONFIRMED, val pinned:Boolean=false, val edited:Boolean=false, val deleted:Boolean=false, val continuityCue:ContinuityCue?=null)
+@Serializable data class ArchiveSourceScope(val conversationId:String, val branchId:String, val selectedMessageIds:List<String>)
+@Serializable data class ContinuitySettings(val enabled:Boolean=false, val includeRecent:Boolean=true, val recentTurns:Int=3, val selectedFragmentIds:List<String>?=null, val interactionNotes:String="", val nextMessage:String="")
+@Serializable data class Archive(val id:String, val title:String, val conversationIds:List<String>, val entries:List<ArchiveEntry>, val updatedAt:Long=System.currentTimeMillis(), val background:String="", val generationMode:String="legacy", val continuity:ContinuitySettings=ContinuitySettings(), val sourceScopes:List<ArchiveSourceScope> = emptyList(), val rebuiltFromArchiveId:String?=null)
 @Serializable data class SummaryChunk(val id:String, val messages:List<ChatMessage>)
 data class EntryConflict(val existing:ArchiveEntry, val proposed:ArchiveEntry)
 data class MergeResult(val entries:List<ArchiveEntry>, val conflicts:List<EntryConflict>)
@@ -22,6 +25,7 @@ object ArchiveLogic {
  fun localEntries(messages:List<ChatMessage>):List<ArchiveEntry>
  fun merge(existing:List<ArchiveEntry>,incoming:List<ArchiveEntry>):MergeResult
  fun continuationExport(archive:Archive):ExportResult
+ fun continuationExport(archive:Archive,conversations:List<ImportedConversation>):ExportResult
  fun export(archive:Archive,maxCharacters:Int=6000):ExportResult
 }
 ```
@@ -29,11 +33,11 @@ Message IDs must be stable and conversation-scoped. Split long content without l
 
 ### Continuation output
 
-- `continuationExport` is the ordinary result-screen output. It includes the complete nonblank background and every nondeleted entry with nonblank text, including pinned and edited entries. It returns `omittedCount=0` and `pinnedOverflow=false`. An archive with no usable content throws `IllegalArgumentException`.
+- The one-argument `continuationExport` includes the complete nonblank background and every nondeleted entry with nonblank text, including pinned and edited entries. The UI uses the two-argument overload to add enabled continuity content from verified local sources. Both preserve complete saved content and report `omittedCount=0` and `pinnedOverflow=false`; an archive with no usable content may throw `IllegalArgumentException`.
 - Output asks DeepSeek to continue from the background, discussed viewpoints, and recent progress, using later user corrections. Clarification is limited to actual contradictions, important decisions, and explicitly unresolved information. Personal experiences, medical history, commitments, and completed actions stay grounded in explicit user statements. Original modal wording such as “可能” and “一种解释” is preserved in full.
 - The sections are 关于我, 重要的人和事, 已确定的事, 接下来要聊的事, and 重要原话. `USER_FACT`, `ASSISTANT_SUGGESTION`, and `UNCONFIRMED` display as 用户陈述, 讨论中的建议, and 讨论与理解. Consecutive entries of the same kind share one subheading within their category, preserving entry order. Stored kinds, source IDs, pinned/manual edits, and entry text retain their original values. Newly created assistant excerpts use the neutral role label 助手原文.
 - `generationMode="original"` displays 聊天原文 and states that the transcript contains the selected content. `"summary"` displays 续聊摘要. `"legacy"` and unknown values display 已保存的续聊内容. Older stored JSON and backups with this field absent decode as `"legacy"`.
-- The UI measures the complete output in UTF-8 bytes. Content over `60 * 1024` bytes is offered as a saved continuation file. The core function preserves the full text at every size. Advanced operations retain `export(archive,maxCharacters=6000)` and its explicit omission/overflow result, using the same neutral kind labels. Technical source IDs remain locally traceable and are included in advanced output. Ordinary continuation output omits those technical IDs.
+- The UI measures complete output in UTF-8 bytes off the main thread. Content over `60 * 1024` bytes is offered as a saved continuation file; previews expand in 8000-character steps without changing copied or saved output. Both ordinary and detail export screens use complete continuation output, omitting technical source IDs. The legacy capped `export(archive,maxCharacters=6000)` remains a separate core API with explicit omission/overflow results and source IDs; it is not the current UI export path.
 
 ## Android state and controller
 Room stores raw conversations, archives, revisions, and persisted per-chunk summaries/tasks. UI sees StateFlow in a `AppController(application:Application):AndroidViewModel`.
@@ -100,8 +104,11 @@ class AppController(application:Application) : AndroidViewModel(application) {
  suspend fun addConversation(archiveId:String,conversation:ImportedConversation,branchId:String,selectedIds:Set<String>)
  suspend fun saveEntry(archiveId:String,entry:ArchiveEntry)
  suspend fun saveBackground(archiveId:String,background:String)
+ suspend fun saveContinuitySettings(archiveId:String,settings:ContinuitySettings)
  suspend fun deleteArchive(archiveId:String)
  suspend fun organize(archiveId:String,conversationId:String,branchId:String,selectedIds:Set<String>)
+ suspend fun prepareReorganization(archiveId:String,confirmedScopes:List<ArchiveSourceScope>?=null):ReorganizationPlan
+ suspend fun reorganizeArchive(plan:ReorganizationPlan):ReorganizationStart
  suspend fun resumeTask(taskId:String,acknowledgeCost:Boolean)
  suspend fun resumeTask(taskId:String)
  suspend fun cancelTask(taskId:String)
@@ -110,7 +117,7 @@ class AppController(application:Application) : AndroidViewModel(application) {
  suspend fun revisions(archiveId:String):List<Archive>
  suspend fun restore(archiveId:String,revision:Archive)
  suspend fun conflicts(archiveId:String):List<EntryConflict>
- suspend fun resolveConflict(archiveId:String,conflict:EntryConflict,useProposed:Boolean)
+ suspend fun resolveConflict(archiveId:String,conflict:EntryConflict,useProposed:Boolean,observedGroup:List<EntryConflict>?=null)
  suspend fun backupFile():File
  suspend fun restoreBackup(input:InputStream)
  suspend fun restoreBackup(json:String)
@@ -147,9 +154,20 @@ Avoid long work on main thread. UI uses viewModelScope or remembered coroutine l
 - `busy` reflects active wrapped controller operations. Quota and administration have their own loading/error fields. Background organization progress is observed through `tasks`. The one-argument `resumeTask` delegates with `acknowledgeCost=false`. Ambiguous or expired work requires the explicit acknowledged path.
 - Developer login is stored as encrypted `DeveloperPrefs`, separate from BYOK and companion credentials. Changing the developer service address or logging out clears its session and loaded administration state. Expiry or HTTP 401 invalidates the local admin session. Config updates use PATCH followed by GET before publishing confirmed configuration. Stats and user-list refreshes each replace their own result/error state.
 
+## Reorganizing saved archives (1.0.6)
+
+- `prepareReorganization` resolves saved selection scopes, or a uniquely verifiable historical task range when old scope metadata is absent. It may query service quota but never submits a model request. `ReorganizationPlan` carries scope/count descriptions, protected-entry count, estimate, blocking reason, range origin, and any existing target/task IDs. The UI shows one explicit send/cost confirmation and passes the returned plan unchanged to `reorganizeArchive`.
+- Missing or ambiguous ranges require explicit selection limited to the original archive's conversations. The selection screen returns `confirmedScopes` to `prepareReorganization` for the same original archive; it does not call ordinary archive creation or append APIs. Missing messages and branches do not silently widen the scope.
+- `reorganizeArchive` revalidates original content, sources and service settings, then creates a new archive and task atomically. Its `ReorganizationStart` contains `targetArchiveId`, `taskId` and `reusedExisting`. A plan's internal request identity makes repeated submission return the same target/task, including after completion; pending work is reused before new model dispatch. New reorganization tasks have a separate cache identity, while resuming the same task retains completed chunks and its original request identities.
+- `ReorganizationLogic.rebuildArchive` copies background, continuity settings and entries that are edited, deleted, pinned or have no source IDs; ordinary old summaries are not seeded into the new result. New suggestions overlapping protected sources become stored conflicts, including when their IDs differ. The original archive is not modified.
+- `ReorganizationLogic.groupConflicts` groups pairs connected by either existing or proposed entry ID. UI shows all affected old/new content and deletion markers, then submits the complete visible `observedGroup` for one keep/replace decision. Resolution checks the complete group, current snapshots and newly overlapping protected entries before one transaction; stale groups require refresh. Keeping current content preserves deletion state; adopting a group is an explicit replacement, never an automatic default.
+- `Archive.rebuiltFromArchiveId` and the task's `reorganizationOfArchiveId` retain provenance. The archive link is optional: deleting the original does not invalidate the new archive. UI prioritizes unfinished work, permits a fresh check after a completed cancellation, and provides links between versions. Completion with only protected/deleted content and pending suggestions is still completion, not evidence that the model extracted nothing.
+
+User-facing behavior is described in [conversation-continuity.md](conversation-continuity.md#重新整理已有档案).
+
 ## Application update channel
 
-- The current Android source is 1.0.2 / versionCode 11. Clients with the updater can check for a newer same-signature build; older clients without it need a manual upgrade. Lifecycle ON_START (launch or return to foreground) checks `https://digimonlegend.com/continuation-updates/latest.json` quietly. `checkOnStart` uses elapsed time to throttle automatic checks to at most once per five minutes; this is a foreground-entry limit, not a periodic background timer. About exposes a manual check. A newer version is offered through a nonmodal notice that users can postpone. A check only reads the static manifest and never starts a model call or consumes organization request quota.
+- The current Android source is 1.0.6 / versionCode 15. Clients with the updater can check for a newer same-signature build; older clients without it need a manual upgrade. Lifecycle ON_START (launch or return to foreground) checks `https://digimonlegend.com/continuation-updates/latest.json` quietly. `checkOnStart` uses elapsed time to throttle automatic checks to at most once per five minutes; this is a foreground-entry limit, not a periodic background timer. About exposes a manual check. A newer version is offered through a nonmodal notice that users can postpone. A check only reads the static manifest and never starts a model call or consumes organization request quota.
 - Download begins only after the user's explicit action. The downloaded APK stays in the application-private cache and is accepted for installation only when its actual package name, newer version, byte size, SHA-256 and signer match the manifest/current application as required. Bad, truncated or mismatched files cannot be handed to the installer. APK verification does not replace Android's own package/signature checks.
 - Installation must not start while AI organization or saving work is busy. The application requests Android's per-app unknown-source install permission where required and hands the verified APK to the system installer; the user still confirms installation in Android. There is no silent installation or automatic model retry tied to updating.
 - The original manifest and immutable versioned APKs are hosted separately from the organization API. Publishing validates the release, uploads the immutable APK before atomically switching latest.json, and leaves API runtime parameters and accounting unchanged. Forks must configure their own hosting, package identity, signing and trusted update URLs.
@@ -214,7 +232,7 @@ Android maps these payloads to `AdminConfig`, `AdminStats` (`AdminTotals`, `Admi
 ## Persistence and identity
 - Room schema 2 stores large cells as bounded `payload_parts` records. DAO transparently splits/reconstructs them in transactions. Schema 1 migration splits old cells in SQL before a CursorWindow reads them.
 - From 1.0.1, conversation payload storageVersion 1 keeps one messageIndex and integer messageIndices per branch; decode restores shared message objects and rejects conflicting IDs, invalid/duplicate references and orphan index entries. Legacy storageVersion 0 branch-full payloads remain readable. A bounded 64 KiB pipe connects the stream codec to transactional Room payload parts, avoiding the giant expanded JSON string on write and refresh. The Room schema remains 2. Import reuses parsed objects and refresh reuses unchanged conversations.
-- BackupDocument version 2 contains the new conversation payload format; version 1 backups remain supported and pre-1.0.1 apps reject version 2 instead of silently misreading it. The product backup path streams JSON into a uniquely named private temporary file and copies it to the chosen URI; save, cancellation and failures clean staging. Restore decodes the URI InputStream without whole-file bytes/String copies, validates the complete graph before replacement, and keeps the previous 2 GiB input bound. Only internal small-fixture compatibility methods return/accept whole Strings. The decoded object graph is still resident; this does not promise constant-memory backup of arbitrary libraries.
+- From 1.0.6, `BackupDocument` writes version 3 so reorganization task protection semantics require a compatible 1.0.6+ reader. Version 1 and 2 backups remain readable in the new app; version 2 introduced the deduplicated conversation payload format. The product backup path streams JSON into a uniquely named private temporary file and copies it to the chosen URI; save, cancellation and failures clean staging. Restore decodes the URI InputStream without whole-file bytes/String copies, validates the complete graph before replacement, and keeps the previous 2 GiB input bound. Only internal small-fixture compatibility methods return/accept whole Strings. The decoded object graph is still resident; this does not promise constant-memory backup of arbitrary libraries.
 - Entry identity is based on source lineage/category/kind, independent of summary chunk boundaries. Same-lineage text from multiple chunks is aggregated before merge. Cache identity additionally includes content, prompt and provider settings.
 - Empty message selection means none. Provider address changes invalidate old credentials. Archived source and manual edits/tombstones survive updates. Restoring an older archive removes incompatible tasks before they can append data again.
 

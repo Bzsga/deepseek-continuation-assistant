@@ -11,7 +11,7 @@ import kotlinx.serialization.decodeFromString
 /** Validate the complete graph before the single replacement transaction begins. */
 internal object BackupValidation {
     fun validate(backup: BackupDocument) {
-        require(backup.format == "deepseek-continuation-assistant" && backup.version in 1..2) { "不支持此备份格式或版本" }
+        require(backup.format == "deepseek-continuation-assistant" && backup.version in 1..3) { "不支持此备份格式或版本" }
         require(backup.settings.apiKey.isEmpty() && backup.settings.trialToken.isEmpty()) { "备份不应包含服务凭据" }
         unique(backup.sources.map { it.id }, "原始文件")
         unique(backup.conversations.map { it.id }, "会话")
@@ -43,6 +43,7 @@ internal object BackupValidation {
             row.id to conversation
         }
         fun validateArchive(archive: Archive) {
+            validateSoftOrigin(archive.rebuiltFromArchiveId, archive.id)
             require(archive.title.isNotBlank() && archive.title.length <= 100_000 && archive.background.length <= 100_000) { "备份档案文字无效" }
             unique(archive.conversationIds, "档案会话引用")
             require(archive.conversationIds.all { it in conversations }) { "备份档案引用了不存在的会话" }
@@ -74,6 +75,10 @@ internal object BackupValidation {
             val task = row.decodeTask()
             val archive = archives[row.archiveId] ?: error("备份任务引用的档案不存在")
             require(task.id == row.id && task.archiveId == row.archiveId) { "备份任务编号不匹配" }
+            validateSoftOrigin(task.reorganizationOfArchiveId, task.archiveId)
+            require(task.reorganizationOfArchiveId == null || task.reorganizationOfArchiveId == archive.rebuiltFromArchiveId) {
+                "备份重整任务与新版档案来源不匹配"
+            }
             require(task.settings.apiKey.isEmpty() && task.settings.trialToken.isEmpty() && task.secretRef.isEmpty()) { "备份任务不应包含凭据" }
             validateSettings(task.settings)
             require(task.status in setOf("queued", "running", "paused", "completed", "cancelled")) { "备份任务状态无效" }
@@ -104,6 +109,10 @@ internal object BackupValidation {
 
     private fun unique(ids: List<String>, label: String) {
         require(ids.all { it.isNotBlank() && it.length <= 1024 } && ids.distinct().size == ids.size) { "备份${label}编号无效或重复" }
+    }
+
+    private fun validateSoftOrigin(origin: String?, archiveId: String) {
+        require(origin == null || (origin.isNotBlank() && origin.length <= 1024 && origin != archiveId)) { "备份新版档案来源编号无效" }
     }
 
     private fun validateEntry(entry: ArchiveEntry, allowedSources: Set<String>) {

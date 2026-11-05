@@ -2,6 +2,7 @@ package app.banzhan.deepseekcontinuation.data
 
 import app.banzhan.deepseekcontinuation.core.Archive
 import app.banzhan.deepseekcontinuation.core.ArchiveEntry
+import app.banzhan.deepseekcontinuation.core.ArchiveSourceScope
 import app.banzhan.deepseekcontinuation.core.ChatMessage
 import app.banzhan.deepseekcontinuation.core.ImportedConversation
 import kotlinx.serialization.Serializable
@@ -53,6 +54,29 @@ data class AppState(
 data class ConnectionTestResult(val reply: String, val model: String?)
 
 data class OrganizationEstimate(val chunks: Int, val inputTokens: Int, val outputTokens: Int, val estimatedCost: Double?)
+
+enum class ReorganizationRangeOrigin { SAVED_SCOPE, HISTORICAL_TASK, USER_SELECTION, UNAVAILABLE }
+
+data class ReorganizationPlan(
+    val archiveId: String,
+    val archiveTitle: String,
+    val messageCount: Int = 0,
+    val conversationCount: Int = 0,
+    val sourceDescription: String = "",
+    val preservedEntryCount: Int = 0,
+    val estimate: OrganizationEstimate? = null,
+    val blockedReason: String? = null,
+    val existingTargetArchiveId: String? = null,
+    val existingTaskId: String? = null,
+    val sourceScopes: List<ArchiveSourceScope> = emptyList(),
+    val rangeOrigin: ReorganizationRangeOrigin = ReorganizationRangeOrigin.UNAVAILABLE,
+    val needsSourceSelection: Boolean = false,
+    internal val sourceFingerprint: String = "",
+    internal val settingsFingerprint: String = "",
+    internal val requestId: String = java.util.UUID.randomUUID().toString(),
+)
+
+data class ReorganizationStart(val targetArchiveId: String, val taskId: String, val reusedExisting: Boolean)
 
 @Serializable
 data class ServiceSettings(
@@ -111,6 +135,7 @@ internal data class TaskRecord(
     val cancelRequested: Boolean = false,
     // Missing in legacy JSON must never opt an already admitted task into a new prompt.
     val promptVersion: String = SummaryProtocol.LEGACY_PROMPT_VERSION,
+    val reorganizationOfArchiveId: String? = null,
 ) {
     fun display() = OrganizationTask(
         id, archiveId, label, status, chunks.count { it.completed }, chunks.size, message,
@@ -156,9 +181,8 @@ internal data class TaskRecord(
         if (pieces.size <= 1) return@flatMap listOf(retry)
         pieces.mapIndexed { index, piece ->
             val id = hash("resume-split-v1\n${chunk.id}\n${retry.attempt}\n$index\n${piece.id}")
-            val key = hash(appJson.encodeToString(ServiceSettings.serializer(), settings.withoutSecrets()) +
-                "\n" + promptVersion + "\n" + id + "\n" +
-                appJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(ChatMessage.serializer()), piece.messages))
+            val key = organizationCacheKey(settings, promptVersion, id, piece.messages,
+                if (reorganizationOfArchiveId != null) this.id else null)
             TaskChunk(id, piece.messages, key, attempt = retry.attempt)
         }
     }
@@ -178,7 +202,7 @@ internal data class StoredConflict(val existing: ArchiveEntry, val proposed: Arc
 @Serializable
 internal data class BackupDocument(
     val format: String = "deepseek-continuation-assistant",
-    val version: Int = 2,
+    val version: Int = 3,
     val createdAt: Long = System.currentTimeMillis(),
     val settings: ServiceSettings,
     val sources: List<SourceRow>,

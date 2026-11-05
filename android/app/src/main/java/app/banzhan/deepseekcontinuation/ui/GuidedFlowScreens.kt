@@ -49,6 +49,8 @@ private fun FlowSteps(current: Int) {
 @Composable
 internal fun ConversationPickerScreen(
     conversations: List<ImportedConversation>,
+    title: String = "想接着聊哪一段？",
+    detail: String = "默认选中这段聊天的全部消息。",
     onSelect: (String) -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
@@ -62,7 +64,7 @@ internal fun ConversationPickerScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item { FlowSteps(1) }
-        item { SectionTitle("想接着聊哪一段？", "默认选中这段聊天的全部消息。") }
+        item { SectionTitle(title, detail) }
         item {
             OutlinedTextField(
                 query,
@@ -432,6 +434,7 @@ internal fun OrganizationProgressScreen(
     onService: () -> Unit,
     onRebuild: () -> Unit,
     onSavedContent: () -> Unit,
+    onOriginalArchive: (() -> Unit)? = null,
 ) {
     var confirmResume by remember { mutableStateOf(false) }
     var confirmCancel by remember { mutableStateOf(false) }
@@ -477,7 +480,8 @@ internal fun OrganizationProgressScreen(
                             task?.status == "completed" -> "正在打开结果。"
                             task?.status == "cancelled" -> "已停止后续整理，已完成内容会保留。"
                             task?.status == "paused" -> "整理暂时停下了。可以继续上次整理，或检查服务设置。"
-                            else -> "整理未能开始。请检查服务设置，或返回准备页带走原文。"
+                            else -> if (onOriginalArchive != null) "整理未能开始。可以检查服务设置，或返回原档案。"
+                                else "整理未能开始。请检查服务设置，或返回准备页带走原文。"
                         },
                         style = MaterialTheme.typography.bodyMedium,
                     )
@@ -518,15 +522,19 @@ internal fun OrganizationProgressScreen(
                     }
                 if (task != null && task.status !in setOf("completed", "cancelled"))
                     TextButton(onClick = { confirmCancel = true }) { Text("取消整理") }
+                onOriginalArchive?.let { onOriginal ->
+                    TextButton(onClick = onOriginal) { Text("返回原档案") }
+                }
             }
         }
         if (!active && !starting) {
             item {
                 ActionRow {
                     TextButton(onClick = onService) { Text("检查服务设置") }
-                    if (task == null || task.status == "cancelled" || task.status == "completed")
+                    if ((task == null || task.status == "cancelled" || task.status == "completed") && onOriginalArchive == null)
                         TextButton(onClick = onPrepare) { Text("返回准备页") }
-                    else TextButton(onClick = { confirmRebuild = true }) { Text("用当前设置重新开始") }
+                    else if (task != null && task.status !in setOf("cancelled", "completed"))
+                        TextButton(onClick = { confirmRebuild = true }) { Text("用当前设置重新开始") }
                 }
             }
             if (task?.status == "paused")
@@ -582,7 +590,9 @@ internal fun OrganizationProgressScreen(
         AlertDialog(
             onDismissRequest = { confirmRebuild = false },
             title = { Text("取消旧任务并重新准备？") },
-            text = { Text("旧任务会停止，已完成内容会保留。返回准备页后，可以使用当前设置开启新整理。免费服务按请求次数计算，自己的 API 按服务方实际用量计费。") },
+            text = { Text(if (onOriginalArchive != null)
+                "旧任务会停止，已完成内容会保留。将回到原档案，重新检查范围并确认当前服务与费用。"
+                else "旧任务会停止，已完成内容会保留。返回准备页后，可以使用当前设置开启新整理。免费服务按请求次数计算，自己的 API 按服务方实际用量计费。") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -608,6 +618,11 @@ internal fun ContinuationResultScreen(
     onOpenDeepSeek: () -> Unit,
     onDetails: () -> Unit,
     onPrepare: () -> Unit,
+    archives: List<Archive> = emptyList(),
+    tasks: List<OrganizationTask> = emptyList(),
+    busy: Boolean = false,
+    onReorganize: () -> Unit = {},
+    onOpenRecord: (String) -> Unit = {},
 ) {
     var export by remember(archive, conversations) { mutableStateOf<Result<ExportResult>?>(null) }
     var large by remember(archive, conversations) { mutableStateOf(false) }
@@ -624,6 +639,7 @@ internal fun ContinuationResultScreen(
     var previewLimit by rememberSaveable(archive.id) { mutableIntStateOf(8000) }
     val text = export?.getOrNull()?.text
     val unfinished = task != null && task.status != "completed"
+    val rebuiltCompleted = archive.rebuiltFromArchiveId != null && task?.status == "completed"
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
@@ -635,6 +651,7 @@ internal fun ContinuationResultScreen(
                 when {
                     export == null -> "正在准备续聊内容"
                     unfinished -> "已保存的部分内容"
+                    rebuiltCompleted -> "重新整理已完成"
                     archive.generationMode == "original" -> "原文准备好了"
                     archive.generationMode == "summary" && text != null -> "整理好了，可以接着聊"
                     archive.generationMode == "summary" -> "这次没有提取到内容"
@@ -644,16 +661,25 @@ internal fun ContinuationResultScreen(
             )
         }
         if (unfinished) item { NoticeCard("整理尚未完成，下面是目前已保存的内容。") }
+        if (rebuiltCompleted && text != null) item {
+            Text("已保留个人设置和手动内容。", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (export == null) {
             item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
         } else if (text == null) {
             item {
                 NoticeCard(
-                    if (archive.generationMode == "summary") "没有提取到可续聊的内容，可以返回准备页改用「先带走原文」。"
+                    if (rebuiltCompleted) "重新整理已完成，已保留你的修改与删除；需要时到详细内容核对新建议。"
+                    else if (archive.generationMode == "summary") "没有提取到可续聊的内容，可以返回准备页改用「先带走原文」。"
                     else export?.exceptionOrNull()?.message ?: "还没有可导出的内容。"
                 )
             }
-            item { Button(onClick = onPrepare) { Text("返回准备页") } }
+            item {
+                if (rebuiltCompleted) Button(onClick = onDetails) { Text("查看详细内容与新建议") }
+                else Button(onClick = onPrepare) { Text("返回准备页") }
+                ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
+            }
         } else {
             item {
                 if (archive.generationMode == "original")
@@ -684,6 +710,7 @@ internal fun ContinuationResultScreen(
                     color = Blue,
                 )
                 ContinuitySetupCard(archive, conversations, onSaveContinuity)
+                ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
             }
             item {
                 Surface(shape = MaterialTheme.shapes.medium) {

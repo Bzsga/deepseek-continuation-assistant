@@ -3,6 +3,9 @@ package app.banzhan.deepseekcontinuation.data
 import app.banzhan.deepseekcontinuation.core.ArchiveEntry
 import app.banzhan.deepseekcontinuation.core.ArchiveLogic
 import app.banzhan.deepseekcontinuation.core.MergeResult
+import app.banzhan.deepseekcontinuation.core.ChatMessage
+import app.banzhan.deepseekcontinuation.core.ReorganizationLogic
+import kotlinx.serialization.encodeToString
 import java.time.OffsetDateTime
 
 internal fun settingsForSave(previous: ServiceSettings, requested: ServiceSettings): ServiceSettings {
@@ -96,9 +99,23 @@ internal fun aggregateChunkEntries(parts: List<List<ArchiveEntry>>): List<Archiv
 
 internal fun mergeTaskProgress(
     existing: List<ArchiveEntry>, previousProgress: List<ArchiveEntry>, currentProgress: List<ArchiveEntry>,
+    rebuilding: Boolean = false,
 ): MergeResult {
     val previousById = previousProgress.associateBy { it.id }
     // Only replace an unchanged output produced by this task. User edits and tombstones stay protected.
     val preserved = existing.filterNot { entry -> !entry.edited && !entry.pinned && !entry.deleted && entry == previousById[entry.id] }
-    return ArchiveLogic.merge(preserved, currentProgress)
+    return if (rebuilding) ReorganizationLogic.mergeRebuiltEntries(preserved, currentProgress)
+        else ArchiveLogic.merge(preserved, currentProgress)
 }
+
+/** Normal tasks retain their historical key; a rebuild can only reuse its own paid results. */
+internal fun organizationCacheKey(settings: ServiceSettings, promptVersion: String, chunkId: String,
+    messages: List<ChatMessage>, reorganizationTaskId: String? = null): String {
+    val ordinary = hash(appJson.encodeToString(settings.withoutSecrets()) + "\n" + promptVersion + "\n" +
+        chunkId + "\n" + appJson.encodeToString(messages))
+    return if (reorganizationTaskId == null) ordinary else hash("reorganization-v1\n$reorganizationTaskId\n$ordinary")
+}
+
+internal fun TaskRecord.blocksReorganization(): Boolean = status in setOf("queued", "running", "paused") ||
+    hasUnknownRequest() || chunks.any { !it.completed && it.remoteJobId.isNotBlank() &&
+        it.remoteStatus !in setOf("failed", "uncertain", "cancelled", "expired") }

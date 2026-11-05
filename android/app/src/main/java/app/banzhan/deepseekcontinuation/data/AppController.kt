@@ -13,12 +13,14 @@ import app.banzhan.deepseekcontinuation.BuildConfig
 import app.banzhan.deepseekcontinuation.core.Archive
 import app.banzhan.deepseekcontinuation.core.ArchiveEntry
 import app.banzhan.deepseekcontinuation.core.ArchiveLogic
+import app.banzhan.deepseekcontinuation.core.ArchiveSourceScope
 import app.banzhan.deepseekcontinuation.core.ChatMessage
 import app.banzhan.deepseekcontinuation.core.ContinuityLogic
 import app.banzhan.deepseekcontinuation.core.ContinuitySettings
 import app.banzhan.deepseekcontinuation.core.DeepSeekImporter
 import app.banzhan.deepseekcontinuation.core.EntryConflict
 import app.banzhan.deepseekcontinuation.core.ImportedConversation
+import app.banzhan.deepseekcontinuation.core.ReorganizationLogic
 import java.security.MessageDigest
 import java.io.File
 import java.io.InputStream
@@ -809,6 +811,131 @@ class AppController internal constructor(application: Application, databaseName:
         }
     }
 
+    /** Preparing may check service quota, but never submits a model request. */
+    suspend fun prepareReorganization(archiveId: String,
+        confirmedScopes: List<ArchiveSourceScope>? = null): ReorganizationPlan = operation {
+        val (archive, resolved) = mutex.withLock {
+            requireWritable()
+            require(archiveId !in deletingArchives) { "档案正在删除" }
+            val original = loadArchive(archiveId)
+            val tasks = dao.tasks().map { it.decodeTask() }
+            pendingReorganization(archiveId, tasks)?.let { return@operation existingReorganizationPlan(original, it) }
+            if (!conversationCacheValid) refresh(reloadConversations = true)
+            val sources = try {
+                resolveReorganizationSources(original, state.value.conversations, tasks, confirmedScopes)
+            } catch (error: IllegalArgumentException) {
+                return@operation baseReorganizationPlan(original).copy(blockedReason = error.message,
+                    needsSourceSelection = true)
+            } catch (error: IllegalStateException) {
+                // A new import may no longer contain the previously selected branch.
+                return@operation baseReorganizationPlan(original).copy(blockedReason = error.message,
+                    needsSourceSelection = true)
+            }
+            original to sources
+        }
+        val base = baseReorganizationPlan(archive).copy(sourceScopes = resolved.sourceScopes,
+            messageCount = resolved.messageGroups.sumOf { it.size },
+            conversationCount = resolved.sourceScopes.map { it.conversationId }.distinct().size,
+            sourceDescription = resolved.description, rangeOrigin = resolved.rangeOrigin,
+            sourceFingerprint = reorganizationSourceFingerprint(archive, resolved))
+        try {
+            val snapshot = if (state.value.settings.mode == "companion") ensureCompanionIdentity() else state.value.settings
+            val quota = if (snapshot.mode == "companion") refreshQuotaState() else null
+            require(state.value.settings == snapshot) { "服务设置已改变，请重新检查后开始。" }
+            quota?.organizationBlocker()?.let { error(it) }
+            val settings = validateOrganizationConfiguration(if (quota != null) settingsWithServerBudget(snapshot, quota) else snapshot)
+            val estimates = resolved.messageGroups.map { estimateOrganization(settings, it) }
+            base.copy(estimate = OrganizationEstimate(estimates.sumOf { it.chunks }, estimates.sumOf { it.inputTokens },
+                estimates.sumOf { it.outputTokens }, if (estimates.all { it.estimatedCost != null })
+                    estimates.sumOf { it.estimatedCost ?: 0.0 } else null),
+                settingsFingerprint = hash(appJson.encodeToString(settings)))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            base.copy(blockedReason = error.message ?: "无法检查整理服务，请先检查服务设置。")
+        }
+    }
+
+    suspend fun reorganizeArchive(plan: ReorganizationPlan): ReorganizationStart = operation {
+        // Resolve an existing progress before any network preflight, including a stopping job.
+        mutex.withLock {
+            requireWritable()
+            confirmedReorganization(plan)?.let { return@operation it }
+            pendingReorganization(plan.archiveId, dao.tasks().map { it.decodeTask() })?.let {
+                return@operation ReorganizationStart(it.archiveId, it.id, true)
+            }
+        }
+        require(plan.blockedReason == null && !plan.needsSourceSelection && plan.sourceFingerprint.isNotBlank() &&
+            plan.settingsFingerprint.isNotBlank()) { plan.blockedReason ?: "请重新检查原文范围和服务设置。" }
+        val snapshot = if (state.value.settings.mode == "companion") ensureCompanionIdentity() else state.value.settings
+        val quota = if (snapshot.mode == "companion") refreshQuotaState() else null
+        val started = mutex.withLock {
+            requireWritable()
+            confirmedReorganization(plan)?.let { return@operation it }
+            require(plan.archiveId !in deletingArchives) { "档案正在删除" }
+            val tasks = dao.tasks().map { it.decodeTask() }
+            pendingReorganization(plan.archiveId, tasks)?.let {
+                return@operation ReorganizationStart(it.archiveId, it.id, true)
+            }
+            val original = loadArchive(plan.archiveId)
+            if (!conversationCacheValid) refresh(reloadConversations = true)
+            val resolved = resolveReorganizationSources(original, state.value.conversations, tasks, plan.sourceScopes)
+            require(reorganizationSourceFingerprint(original, resolved) == plan.sourceFingerprint) {
+                "档案或原文已变化，请重新检查后确认整理。"
+            }
+            require(state.value.settings == snapshot) { "服务设置已改变，请重新检查后开始。" }
+            quota?.organizationBlocker()?.let { error(it) }
+            val settings = validateOrganizationConfiguration(if (quota != null) settingsWithServerBudget(snapshot, quota) else snapshot)
+            require(hash(appJson.encodeToString(settings)) == plan.settingsFingerprint) {
+                "服务或分段预算已变化，请重新查看费用后确认。"
+            }
+            val targetId = UUID.randomUUID().toString()
+            val taskId = plan.requestId
+            val records = resolved.messageGroups.flatMapIndexed { index, messages ->
+                val scope = resolved.sourceScopes[index]
+                budgetedChunks(messages, settings).map { chunk ->
+                    val chunkId = hash("reorganization-scope-v1\n${scope.conversationId}\n${scope.branchId}\n${chunk.id}")
+                    TaskChunk(chunkId, chunk.messages,
+                        organizationCacheKey(settings, SummaryProtocol.PROMPT_VERSION, chunkId, chunk.messages, taskId))
+                }
+            }
+            require(records.isNotEmpty()) { "没有可重新整理的文字。" }
+            val target = ReorganizationLogic.rebuildArchive(original, targetId)
+                .copy(sourceScopes = resolved.sourceScopes)
+            val task = TaskRecord(taskId, targetId, target.title, settings.withoutSecrets(), "task:$taskId", records,
+                message = estimateCost(settings, records), promptVersion = SummaryProtocol.PROMPT_VERSION,
+                reorganizationOfArchiveId = original.id)
+            credentials.put(task.secretRef, if (settings.mode == "byok") settings.apiKey else settings.trialToken)
+            DiagnosticLog.record("task", "prepare", mapOf("chunk_count" to records.size.toLong()))
+            database.withTransaction {
+                saveArchive(target, keepRevision = false)
+                saveTask(task)
+            }
+            refresh()
+            ReorganizationStart(targetId, taskId, false)
+        }
+        launchTask(started.taskId)
+        started
+    }
+
+    private fun baseReorganizationPlan(archive: Archive) = ReorganizationPlan(archive.id, archive.title,
+        preservedEntryCount = archive.entries.count { it.edited || it.deleted || it.pinned || it.sourceIds.isEmpty() })
+
+    private fun existingReorganizationPlan(archive: Archive, task: TaskRecord) = baseReorganizationPlan(archive).copy(
+        existingTargetArchiveId = task.archiveId, existingTaskId = task.id)
+
+    private suspend fun confirmedReorganization(plan: ReorganizationPlan): ReorganizationStart? {
+        val task = dao.task(plan.existingTaskId ?: plan.requestId)?.decodeTask() ?: return null
+        require(task.reorganizationOfArchiveId == plan.archiveId ||
+            (plan.existingTaskId == task.id && task.archiveId == plan.archiveId)) { "整理确认已失效，请重新检查。" }
+        return ReorganizationStart(task.archiveId, task.id, true)
+    }
+
+    private fun pendingReorganization(archiveId: String, tasks: List<TaskRecord>): TaskRecord? = tasks.firstOrNull {
+        (it.archiveId == archiveId || it.reorganizationOfArchiveId == archiveId) &&
+            (it.blocksReorganization() || jobs[it.id]?.isCompleted == false)
+    }
+
     suspend fun organize(archiveId: String, conversationId: String, branchId: String, selectedIds: Set<String>) = operation {
         val settingsSnapshot = if (state.value.settings.mode == "companion") ensureCompanionIdentity() else state.value.settings
         val freeQuota = if (settingsSnapshot.mode == "companion") refreshQuotaState() else null
@@ -832,7 +959,7 @@ class AppController internal constructor(application: Application, databaseName:
             val id = UUID.randomUUID().toString()
             credentials.put("task:$id", secret)
             val records = chunks.map { chunk ->
-                val key = hash(appJson.encodeToString(settings.withoutSecrets()) + "\n" + SummaryProtocol.PROMPT_VERSION + "\n" + chunk.id + "\n" + appJson.encodeToString(chunk.messages))
+                val key = organizationCacheKey(settings, SummaryProtocol.PROMPT_VERSION, chunk.id, chunk.messages)
                 TaskChunk(chunk.id, chunk.messages, key)
             }
             val task = TaskRecord(id, archiveId, archive.title, settings.withoutSecrets(), "task:$id", records,
@@ -977,22 +1104,22 @@ class AppController internal constructor(application: Application, databaseName:
         } }
     }
 
-    suspend fun resolveConflict(archiveId: String, conflict: EntryConflict, useProposed: Boolean) = operation {
+    suspend fun resolveConflict(archiveId: String, conflict: EntryConflict, useProposed: Boolean,
+        observedGroup: List<EntryConflict>? = null) = operation {
         mutex.withLock {
             requireWritable()
             database.withTransaction {
-                val serialized = appJson.encodeToString(StoredConflict(conflict.existing, conflict.proposed))
-                val row = dao.conflicts(archiveId).firstOrNull { it.payload == serialized }
-                    ?: error("冲突已处理，请刷新列表")
-                val archive = loadArchive(archiveId)
-                val current = archive.entries.firstOrNull { it.id == conflict.existing.id }
-                if (useProposed) {
-                    require(current == conflict.existing) { "条目已被编辑，请保留当前内容并重新整理" }
-                    val replacement = conflict.proposed.copy(id = conflict.existing.id, edited = true,
-                        pinned = conflict.existing.pinned, deleted = false)
-                    saveArchive(archive.copy(entries = archive.entries.map { if (it.id == replacement.id) replacement else it }))
+                val all = dao.conflicts(archiveId).map { row ->
+                    val stored = appJson.decodeFromString<StoredConflict>(row.payload)
+                    EntryConflict(stored.existing, stored.proposed)
                 }
-                dao.deleteConflict(row.id)
+                val archive = loadArchive(archiveId)
+                val selected = observedGroup ?: listOf(conflict)
+                require(conflict in selected) { "待处理内容已变化，请刷新列表。" }
+                val merged = ReorganizationLogic.resolveConflictGroup(archive.entries, all, selected, useProposed)
+                if (merged.entries != archive.entries) saveArchive(archive.copy(entries = merged.entries))
+                dao.deleteConflicts(archiveId)
+                saveConflicts(archiveId, merged.conflicts)
             }
             refresh()
         }
@@ -1131,7 +1258,9 @@ class AppController internal constructor(application: Application, databaseName:
                 if (!task.cancelRequested && task.status == "running" && task.chunks.all { it.completed }) {
                     val archive = loadArchive(task.archiveId)
                     val hasContent = archive.background.isNotBlank() || archive.entries.any { !it.deleted && it.text.isNotBlank() }
-                    val message = if (hasContent) "整理完成，人工修改和置顶内容已保留"
+                    val message = if (task.reorganizationOfArchiveId != null && dao.conflicts(archive.id).isNotEmpty())
+                        "已保留你的修订/删除，新建议可在详细内容的核对冲突查看"
+                    else if (hasContent) "整理完成，人工修改和置顶内容已保留"
                     else "没有提取到可续聊的内容，可改用原文模式。"
                     saveTask(task.withoutInFlight().copy(status = "completed", uncertain = false, message = message))
                 }
@@ -1287,7 +1416,8 @@ class AppController internal constructor(application: Application, databaseName:
                 }
                 val previousProgress = aggregateChunkEntries(task.chunks.filter { it.completed }.map { parts.getValue(it.id) })
                 val currentProgress = aggregateChunkEntries(task.chunks.filter { it.completed || it.id == chunk.id }.map { parts.getValue(it.id) })
-                val merged = mergeTaskProgress(archive.entries, previousProgress, currentProgress)
+                val merged = mergeTaskProgress(archive.entries, previousProgress, currentProgress,
+                    rebuilding = task.reorganizationOfArchiveId != null)
                 saveArchive(archive.copy(entries = merged.entries,
                     generationMode = if (archive.generationMode == "original" && entries.isNotEmpty()) "legacy" else archive.generationMode))
                 saveConflicts(archive.id, merged.conflicts)

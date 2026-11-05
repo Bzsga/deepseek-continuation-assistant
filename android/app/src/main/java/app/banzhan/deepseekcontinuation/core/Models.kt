@@ -64,6 +64,8 @@ data class Archive(
     val generationMode: String = "legacy",
     val continuity: ContinuitySettings = ContinuitySettings(),
     val sourceScopes: List<ArchiveSourceScope> = emptyList(),
+    // Optional provenance only; deleting the source archive does not invalidate this archive.
+    val rebuiltFromArchiveId: String? = null,
 )
 
 /** Exact selected branch/range; message bodies remain in the imported source store. */

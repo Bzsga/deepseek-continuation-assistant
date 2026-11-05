@@ -190,7 +190,7 @@ internal fun ArchiveSummary(archive: Archive, onOpen: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    "${when (archive.generationMode) { "original" -> "聊天原文"
+                    "${if (archive.rebuiltFromArchiveId != null) "重新整理 · " else ""}${when (archive.generationMode) { "original" -> "聊天原文"
  "summary" -> "智能整理内容"
  else -> "已保存内容" }} · ${formatTime(archive.updatedAt)}",
                     style = MaterialTheme.typography.bodySmall,
@@ -209,16 +209,18 @@ internal fun SelectionScreen(
     initialTargetId: String?,
     busy: Boolean,
     initialBranchId: String? = null,
+    scopeOnly: Boolean = false,
+    selectionContextKey: String = "advanced",
     onSave: (String, String, Set<String>, String, String?, Boolean) -> Unit,
 ) {
     var branchId by
-        rememberSaveable(conversation.id) {
+        rememberSaveable(conversation.id, selectionContextKey) {
             mutableStateOf(initialBranchId ?: defaultChatVersion(conversation).orEmpty())
         }
     val branch = conversation.branches.firstOrNull { it.id == branchId }
-    val selectionKey = "advanced:${conversation.id}:$branchId"
+    val selectionKey = "$selectionContextKey:${conversation.id}:$branchId"
     var customizedVersions by
-        rememberSaveable(conversation.id) { mutableStateOf(arrayListOf<String>()) }
+        rememberSaveable(conversation.id, selectionContextKey) { mutableStateOf(arrayListOf<String>()) }
     val selectionMemory: MessageSelectionMemory = viewModel()
     val allIds = remember(branch) { branch?.messages?.map { it.id }?.toSet().orEmpty() }
     val range = selectionMemory.range(selectionKey, allIds, branchId in customizedVersions)
@@ -242,7 +244,8 @@ internal fun SelectionScreen(
         item {
             SectionTitle(
                 conversation.title,
-                "${conversation.createdAt.ifBlank { "起始时间未提供" }} — ${conversation.updatedAt.ifBlank { "结束时间未提供" }}",
+                if (scopeOnly) "使用这次明确选择的范围生成新版，原档案和个人修改会保留。"
+                else "${conversation.createdAt.ifBlank { "起始时间未提供" }} — ${conversation.updatedAt.ifBlank { "结束时间未提供" }}",
             )
         }
         if (conversation.title.startsWith(MANUAL_PASTE_TITLE_PREFIX)) {
@@ -267,7 +270,7 @@ internal fun SelectionScreen(
                 }
             }
         }
-        item {
+        if (!scopeOnly) item {
             SectionTitle("保存位置")
             ActionRow {
                 FilterChip(
@@ -344,6 +347,12 @@ internal fun SelectionScreen(
         }
         item {
             ActionRow {
+                if (scopeOnly) {
+                    Button(
+                        onClick = { onSave(title, branchId, selected, background, null, true) },
+                        enabled = !busy && selected.isNotEmpty(),
+                    ) { Text("使用此范围") }
+                } else {
                 Button(
                     onClick = { onSave(title, branchId, selected, background, targetId, false) },
                     enabled =
@@ -360,9 +369,11 @@ internal fun SelectionScreen(
                     Spacer(Modifier.width(6.dp))
                     Text("AI 整理")
                 }
+                }
             }
             Text(
-                "创建档案会保留选中原文；AI 整理会在确认服务与费用后发送所选内容。",
+                if (scopeOnly) "下一步会确认服务与费用，此处不会发送消息。"
+                else "创建档案会保留选中原文；AI 整理会在确认服务与费用后发送所选内容。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

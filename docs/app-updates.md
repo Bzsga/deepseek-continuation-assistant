@@ -14,6 +14,14 @@
 
 早期 preview.6 及以前版本没有更新模块，需要一次手动同签名升级；之后可以使用应用内检查。
 
+## 1.0.6 升级与备份兼容
+
+1.0.6 新增已有档案的“重新整理”。升级本身不会重新请求模型；在确认原文范围、服务及预计请求次数或费用后，点击一次“确认并重新整理”才开始。免费服务按实际发出的请求计次，BYOK 按服务方实际使用计费。
+
+重新整理另存新版，原档案继续保留。新版继承手动修改、删除、固定条目和个人设置；来源范围无法可靠恢复时，需要明确重新选择。冲突默认保留已有内容，具体行为见[重新整理已有档案](conversation-continuity.md#重新整理已有档案)。
+
+1.0.6 导出的格式 3 备份需要 1.0.6 或更新版本恢复；新版继续读取旧格式 1、2。
+
 ## 清单协议
 
 清单是严格 UTF-8 JSON，最多 32 KiB。
@@ -34,7 +42,7 @@
 
 ## 版本与签名
 
-当前 Android 为 1.0.5 / versionCode 14。自 1.0.1 起使用递增数字 `major.minor.patch`，每次发布递增 versionCode，至少推进 patch。设置页显示实际 BuildConfig 版本。桥接测试属性 `updateTestVersionCode` / `updateTestVersionName` 只用于本地升级验证，不作为正式发布版本。
+当前 Android 源码为 1.0.6 / versionCode 15。自 1.0.1 起使用递增数字 `major.minor.patch`，每次发布递增 versionCode，至少推进 patch。设置页显示实际 BuildConfig 版本。桥接测试属性 `updateTestVersionCode` / `updateTestVersionName` 只用于本地升级验证，不作为正式发布版本。
 
 `tools/verify_release.py` 调用 Android SDK 的 `apksigner` 与 `aapt2`，生成和 APK 哈希绑定的验证元数据。现有工具固定了原版包名与公开证书摘要；Fork 必须替换为自己的身份与证书，不能仅改清单跳过验签。私钥和密码不属于源码。
 

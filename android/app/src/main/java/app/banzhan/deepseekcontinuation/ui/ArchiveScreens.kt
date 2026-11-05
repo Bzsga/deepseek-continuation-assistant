@@ -16,6 +16,8 @@ import androidx.compose.ui.unit.dp
 import app.banzhan.deepseekcontinuation.core.*
 import app.banzhan.deepseekcontinuation.data.*
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun ArchivesScreen(
@@ -48,6 +50,8 @@ internal fun ArchiveScreen(
     onExport: (Archive) -> Unit,
     onSelectConversation: (String) -> Unit,
     onDeleted: () -> Unit,
+    onReorganize: () -> Unit = {},
+    onOpenRecord: (String) -> Unit = {},
 ) {
     var editEntry by remember { mutableStateOf<ArchiveEntry?>(null) }
     var editBackground by remember { mutableStateOf(false) }
@@ -110,6 +114,11 @@ internal fun ArchiveScreen(
                     Text("核对冲突")
                 }
             }
+        }
+        item {
+            ArchiveReorganizationActions(
+                archive, state.archives, state.tasks, state.busy, onReorganize, onOpenRecord,
+            )
         }
         item {
             ContinuitySetupCard(archive, state.conversations) { settings ->
@@ -354,42 +363,14 @@ internal fun ArchiveScreen(
         )
     }
     conflicts?.let { list ->
-        AppDialog(
-            "核对更新冲突",
-            { conflicts = null },
-            actions = { TextButton(onClick = { conflicts = null }) { Text("关闭") } },
-        ) {
-            if (list.isEmpty()) Text("目前没有待处理的冲突。手动编辑和固定内容会受到保留保护。")
-            list.forEach { conflict ->
-                Text("当前条目", style = MaterialTheme.typography.labelLarge, color = Blue)
-                Text(conflict.existing.text)
-                Text("新整理的内容", style = MaterialTheme.typography.labelLarge, color = Blue)
-                Text(conflict.proposed.text)
-                ActionRow {
-                    OutlinedButton(
-                        onClick = {
-                            run {
-                                controller.resolveConflict(archive.id, conflict, false)
-                                conflicts = controller.conflicts(archive.id)
-                            }
-                        }
-                    ) {
-                        Text("保留当前")
-                    }
-                    Button(
-                        onClick = {
-                            run {
-                                controller.resolveConflict(archive.id, conflict, true)
-                                conflicts = controller.conflicts(archive.id)
-                            }
-                        }
-                    ) {
-                        Text("采用新条目")
-                    }
-                }
-                HorizontalDivider()
-            }
-        }
+        ConflictGroupsDialog(
+            conflicts = list,
+            onDismiss = { conflicts = null },
+            onResolve = { group, useProposed ->
+                controller.resolveConflict(archive.id, group.first(), useProposed, observedGroup = group)
+            },
+            onReload = { conflicts = controller.conflicts(archive.id) },
+        )
     }
     if (chooseConversation) {
         AppDialog(
@@ -406,6 +387,135 @@ internal fun ArchiveScreen(
                     }
                 ) {
                     Text(conversation.title)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun ConflictGroupsDialog(
+    conflicts: List<EntryConflict>,
+    onDismiss: () -> Unit,
+    onResolve: suspend (List<EntryConflict>, Boolean) -> Unit,
+    onReload: suspend () -> Unit,
+) {
+    val groups = remember(conflicts) { ReorganizationLogic.groupConflicts(conflicts) }
+    val scope = rememberCoroutineScope()
+    var saving by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun reload() {
+        if (saving) return
+        saving = true
+        scope.launch {
+            try {
+                onReload()
+                error = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = failure.message ?: "未能刷新，请重试。"
+            } finally {
+                saving = false
+            }
+        }
+    }
+
+    fun resolve(group: List<EntryConflict>, useProposed: Boolean) {
+        if (saving) return
+        saving = true
+        error = null
+        scope.launch {
+            try {
+                onResolve(group, useProposed)
+                onReload()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = failure.message ?: "未能处理，请刷新后重试。"
+            } finally {
+                saving = false
+            }
+        }
+    }
+
+    AppDialog(
+        "核对更新冲突",
+        { if (!saving) onDismiss() },
+        actions = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                if (saving) Text("正在处理…", style = MaterialTheme.typography.bodySmall)
+                ActionRow {
+                    TextButton(onClick = onDismiss, enabled = !saving) { Text("关闭") }
+                    TextButton(onClick = ::reload, enabled = !saving) { Text("刷新") }
+                }
+            }
+        },
+    ) {
+        if (groups.isEmpty()) {
+            Text("目前没有待处理的冲突。手动编辑、固定和删除状态会保留。")
+        } else {
+            Text("关联的条目按整组处理，未选择的组会继续保留。", style = MaterialTheme.typography.bodySmall)
+        }
+        groups.forEachIndexed { index, group ->
+            val existing = group.map { it.existing }.distinct()
+            val proposed = group.map { it.proposed }.distinct()
+            val existingCount = existing.distinctBy { it.id }.size
+            val proposedCount = proposed.distinctBy { it.id }.size
+            Text("第 ${index + 1} 组", fontWeight = FontWeight.SemiBold)
+            if (existing.size > existingCount || proposed.size > proposedCount) {
+                Text("同一条目有不同版本，已全部展示；处理前请刷新核对。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("当前内容 · $existingCount 条", style = MaterialTheme.typography.labelLarge, color = Blue)
+            existing.forEach { entry -> ConflictEntryPreview(entry) }
+            Text("新整理的内容 · $proposedCount 条", style = MaterialTheme.typography.labelLarge, color = Blue)
+            proposed.forEach { entry -> ConflictEntryPreview(entry) }
+            if (existing.any { it.deleted }) {
+                Text("这一组含已删除内容；采用新版会用上方的新内容替换这一组。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            ActionRow {
+                OutlinedButton(onClick = { resolve(group, false) }, enabled = !saving && error == null) {
+                    Text("保留当前")
+                }
+                Button(onClick = { resolve(group, true) }, enabled = !saving && error == null) {
+                    Text("采用以上 $proposedCount 条，替换 $existingCount 条")
+                }
+            }
+            if (index < groups.lastIndex) HorizontalDivider()
+        }
+    }
+}
+
+@Composable
+private fun ConflictEntryPreview(entry: ArchiveEntry) {
+    var previewLimit by remember(entry) { mutableIntStateOf(8000) }
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            ActionRow {
+                Text(entry.category.label(), style = MaterialTheme.typography.labelMedium)
+                if (entry.deleted) Text("已删除", color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.labelMedium)
+                if (entry.edited) Text("已编辑", style = MaterialTheme.typography.labelMedium)
+                if (entry.pinned) Text("已固定", style = MaterialTheme.typography.labelMedium)
+            }
+            SelectionContainer { Text(entry.text.take(previewLimit), style = MaterialTheme.typography.bodyMedium) }
+            if (entry.text.length > previewLimit) {
+                Text("当前预览前 $previewLimit 字符，处理时会使用完整条目。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton(onClick = { previewLimit = (previewLimit + 8000).coerceAtMost(entry.text.length) }) {
+                    Text("继续查看")
                 }
             }
         }

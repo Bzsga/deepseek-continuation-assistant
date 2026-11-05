@@ -81,6 +81,11 @@ fun ContinuationApp(
     var pendingDocumentMessage by rememberSaveable { mutableStateOf("") }
     var exportArchive by remember { mutableStateOf<Archive?>(null) }
     var aiRequest by remember { mutableStateOf<AiRequest?>(null) }
+    var reorganizationPlan by remember { mutableStateOf<ReorganizationPlan?>(null) }
+    var reorganizationSourceId by rememberSaveable { mutableStateOf<String?>(null) }
+    var reorganizationReturnRoute by rememberSaveable { mutableStateOf("result") }
+    var reorganizationLoading by remember { mutableStateOf(false) }
+    var reorganizationError by remember { mutableStateOf<String?>(null) }
     var restoreConfirmation by remember { mutableStateOf(false) }
     var getRecordsVisible by rememberSaveable { mutableStateOf(false) }
     var installPreparing by remember { mutableStateOf(false) }
@@ -134,6 +139,36 @@ fun ContinuationApp(
                 "progress"
             else "result"
     }
+    fun requestReorganization(id: String, confirmedScopes: List<ArchiveSourceScope>? = null) {
+        if (submitting || reorganizationLoading) return
+        reorganizationLoading = true
+        reorganizationError = null
+        reorganizationSourceId = id
+        if (route in setOf("result", "archive")) reorganizationReturnRoute = route
+        if (reorganizationPlan?.archiveId != id) reorganizationPlan = null
+        run {
+            try {
+                val prepared = controller.prepareReorganization(id, confirmedScopes)
+                if (prepared.existingTargetArchiveId != null) {
+                    reorganizationPlan = null
+                    openRecord(prepared.existingTargetArchiveId)
+                } else {
+                    if (route in setOf("reorganization_choose", "reorganization_selection")) {
+                        archiveId = id
+                        route = reorganizationReturnRoute
+                    }
+                    reorganizationPlan = prepared
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (reorganizationPlan != null) reorganizationError = error.message ?: "暂时无法准备，请重试。"
+                else throw error
+            } finally {
+                reorganizationLoading = false
+            }
+        }
+    }
     fun prepareCurrentRecord() {
         val id =
             controller.state.value.archives
@@ -157,6 +192,19 @@ fun ContinuationApp(
             when (route) {
                 "archive" -> "result"
                 "selection" -> if (selectionTargetId != null) "archive" else "prepare"
+                "reorganization_selection" -> {
+                    val original = state.archives.firstOrNull { it.id == reorganizationSourceId }
+                    if (state.conversations.count { it.id in original?.conversationIds.orEmpty() } > 1)
+                        "reorganization_choose"
+                    else {
+                        archiveId = reorganizationSourceId ?: archiveId
+                        reorganizationReturnRoute
+                    }
+                }
+                "reorganization_choose" -> {
+                    archiveId = reorganizationSourceId ?: archiveId
+                    reorganizationReturnRoute
+                }
                 "prepare" -> if (batchIds.size > 1) "choose" else "home"
                 "service" -> serviceReturn
                 "developer" -> developerReturn
@@ -310,8 +358,8 @@ fun ContinuationApp(
         }
     }
     val importingSharedFile = incomingImport?.status == IncomingImportStatus.IMPORTING
-    val busy = state.busy || submitting || importingSharedFile || installPreparing
-    val existingModal = aiRequest != null || exportArchive != null || restoreConfirmation
+    val busy = state.busy || submitting || reorganizationLoading || importingSharedFile || installPreparing
+    val existingModal = aiRequest != null || exportArchive != null || restoreConfirmation || reorganizationPlan != null || reorganizationLoading
     val incomingBlocked =
         busy || existingModal || state.tasks.any { it.status in setOf("queued", "running") }
     fun installationBlocker(): String? {
@@ -319,9 +367,10 @@ fun ContinuationApp(
         return when {
             current.tasks.any { it.status in setOf("queued", "running") } -> "整理正在进行，请完成后再安装更新。"
             currentIncomingImport != null -> "请先处理收到的聊天文件，再安装更新。"
-            current.busy || submitting -> "当前操作完成后可安装更新。"
+            current.busy || submitting || reorganizationLoading -> "当前操作完成后可安装更新。"
             aiRequest != null ||
                 exportArchive != null ||
+                reorganizationPlan != null ||
                 restoreConfirmation ||
                 getRecordsVisible -> "请先完成当前页面操作，再安装更新。"
             route !in setOf("home", "archives", "settings", "about") -> "回到首页或关于页后可安装更新。"
@@ -408,6 +457,8 @@ fun ContinuationApp(
                                 "progress" -> "整理进度"
                                 "result" -> "去 DeepSeek 续聊"
                                 "selection" -> "调整范围与管理"
+                                "reorganization_choose" -> "选择重新整理的聊天"
+                                "reorganization_selection" -> "重新选择范围"
                                 "archive" -> "详细内容"
                                 "tasks" -> "整理进度"
                                 "about" -> "关于"
@@ -507,6 +558,8 @@ fun ContinuationApp(
                         when (route) {
                             "prepare",
                             "selection" -> "$route:$conversationId"
+                            "reorganization_selection" -> "$route:$reorganizationSourceId:$conversationId"
+                            "reorganization_choose" -> "$route:$reorganizationSourceId"
                             "result",
                             "progress",
                             "archive" -> "$route:$archiveId"
@@ -540,6 +593,51 @@ fun ContinuationApp(
                                 ) {
                                     prepare(it)
                                 }
+                            "reorganization_choose" -> {
+                                val original = state.archives.firstOrNull { it.id == reorganizationSourceId }
+                                val related = state.conversations.filter { it.id in original?.conversationIds.orEmpty() }
+                                if (related.isEmpty()) {
+                                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        NoticeCard("本机没有这份档案关联的聊天。请重新导入原始记录后，回到原档案重新整理。")
+                                        TextButton(onClick = {
+                                            reorganizationSourceId?.let { openRecord(it) }
+                                        }) { Text("返回原档案") }
+                                    }
+                                } else {
+                                    ConversationPickerScreen(
+                                        related,
+                                        title = "重新整理哪段聊天？",
+                                        detail = "这次只整理所选的一段聊天，原档案中的个人修改和设置会保留。",
+                                    ) {
+                                        conversationId = it
+                                        route = "reorganization_selection"
+                                    }
+                                }
+                            }
+                            "reorganization_selection" -> {
+                                val original = state.archives.firstOrNull { it.id == reorganizationSourceId }
+                                val conversation = state.conversations.firstOrNull {
+                                    it.id == conversationId && it.id in original?.conversationIds.orEmpty()
+                                }
+                                if (original == null || conversation == null) {
+                                    NoticeCard("原档案或关联聊天已不在本机，请返回后重新导入原始记录。", Modifier.padding(20.dp))
+                                } else {
+                                    SelectionScreen(
+                                        conversation,
+                                        emptyList(),
+                                        null,
+                                        busy,
+                                        scopeOnly = true,
+                                        selectionContextKey = "reorganization:${original.id}",
+                                    ) { _, branchId, selectedIds, _, _, _ ->
+                                        val orderedIds = conversation.branches.first { it.id == branchId }
+                                            .messages.filter { it.id in selectedIds }.map { it.id }
+                                        requestReorganization(original.id, listOf(
+                                            ArchiveSourceScope(conversation.id, branchId, orderedIds)
+                                        ))
+                                    }
+                                }
+                            }
                             "prepare" -> {
                                 val conversation =
                                     state.conversations.firstOrNull { it.id == conversationId }
@@ -574,10 +672,20 @@ fun ContinuationApp(
                                     onRebuild = {
                                         run {
                                             currentTask?.let { controller.cancelTask(it.id) }
-                                            prepareCurrentRecord()
+                                            val originalId = controller.state.value.archives
+                                                .firstOrNull { it.id == archiveId }?.rebuiltFromArchiveId
+                                            if (originalId != null) {
+                                                archiveId = originalId
+                                                route = "result"
+                                                requestReorganization(originalId)
+                                            } else prepareCurrentRecord()
                                         }
                                     },
                                     onSavedContent = { route = "result" },
+                                    onOriginalArchive = state.archives.firstOrNull { it.id == archiveId }
+                                        ?.rebuiltFromArchiveId
+                                        ?.takeIf { id -> state.archives.any { it.id == id } }
+                                        ?.let { id -> { openRecord(id) } },
                                 )
                             "result" -> {
                                 val archive = state.archives.firstOrNull { it.id == archiveId }
@@ -621,6 +729,11 @@ fun ContinuationApp(
                                         onOpenDeepSeek = { run { openDeepSeek(context) } },
                                         onDetails = { route = "archive" },
                                         onPrepare = { prepareCurrentRecord() },
+                                        archives = state.archives,
+                                        tasks = state.tasks,
+                                        busy = busy,
+                                        onReorganize = { requestReorganization(archive.id) },
+                                        onOpenRecord = { openRecord(it) },
                                     )
                             }
                             "paste" ->
@@ -706,6 +819,8 @@ fun ContinuationApp(
                                         { exportArchive = it },
                                         { advancedConversation(it, archive.id) },
                                         { route = "archives" },
+                                        onReorganize = { requestReorganization(archive.id) },
+                                        onOpenRecord = { openRecord(it) },
                                     )
                             }
                             "settings",
@@ -743,6 +858,10 @@ fun ContinuationApp(
                                     onReady = {
                                         preparationError = null
                                         route = serviceReturn
+                                        reorganizationPlan?.let { pending ->
+                                            requestReorganization(pending.archiveId,
+                                                pending.sourceScopes.takeIf { pending.rangeOrigin == ReorganizationRangeOrigin.USER_SELECTION })
+                                        }
                                     },
                                 )
                             "developer" -> DeveloperScreen(state, controller, run)
@@ -833,6 +952,57 @@ fun ContinuationApp(
                             }
                         context.startActivity(Intent.createChooser(intent, "分享续聊档案"))
                     }
+                },
+            )
+        }
+        reorganizationPlan?.takeIf {
+            route in setOf("result", "archive") && archiveId == it.archiveId
+        }?.let { plan ->
+            ReorganizationDialog(
+                plan = plan,
+                state = state,
+                busy = busy,
+                error = reorganizationError,
+                onDismiss = { reorganizationPlan = null; reorganizationError = null },
+                onConfirm = {
+                    if (!submitting && !reorganizationLoading) {
+                        submitting = true
+                        reorganizationError = null
+                        run {
+                            try {
+                                val started = controller.reorganizeArchive(plan)
+                                reorganizationPlan = null
+                                progressError = null
+                                openRecord(started.targetArchiveId)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (error: Exception) {
+                                reorganizationError = error.message ?: "这次重新整理未能开始，请检查后重试。"
+                            } finally {
+                                submitting = false
+                            }
+                        }
+                    }
+                },
+                onSelectRange = {
+                    reorganizationSourceId = plan.archiveId
+                    reorganizationPlan = null
+                    reorganizationError = null
+                    val original = controller.state.value.archives.firstOrNull { it.id == plan.archiveId }
+                    val related = controller.state.value.conversations.filter { it.id in original?.conversationIds.orEmpty() }
+                    if (related.size == 1) {
+                        conversationId = related.first().id
+                        route = "reorganization_selection"
+                    } else route = "reorganization_choose"
+                },
+                onSettings = {
+                    archiveId = plan.archiveId
+                    service(reorganizationReturnRoute)
+                },
+                onQuotaRefresh = { run { controller.refreshQuota() } },
+                onRefresh = {
+                    requestReorganization(plan.archiveId,
+                        plan.sourceScopes.takeIf { plan.rangeOrigin == ReorganizationRangeOrigin.USER_SELECTION })
                 },
             )
         }

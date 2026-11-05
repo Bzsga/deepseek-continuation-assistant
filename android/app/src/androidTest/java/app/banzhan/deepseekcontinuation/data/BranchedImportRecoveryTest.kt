@@ -102,7 +102,7 @@ class BranchedImportRecoveryTest {
             val backup = controller.backupFile()
             try {
                 val prefix = backup.inputStream().use { input -> ByteArray(160).let { it.copyOf(input.read(it)).toString(Charsets.UTF_8) } }
-                assertTrue(prefix.contains("\"version\":2"))
+                assertTrue(prefix.contains("\"version\":3"))
                 withTimeout(90_000) { backup.inputStream().use { controller.restoreBackup(it) } }
             } finally { backup.delete() }
             verify(controller)
