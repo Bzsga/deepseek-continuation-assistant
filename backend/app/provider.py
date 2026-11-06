@@ -1061,7 +1061,8 @@ async def _organize(settings: Settings, snapshot, messages, trace, *, context_me
                         else:
                             if (isinstance(error_document, dict)
                                     and isinstance(error_document.get("error"), dict)
-                                    and error_document["error"].get("message")
+                                    and isinstance(error_document["error"].get("message"), str)
+                                    and error_document["error"]["message"].strip().casefold()
                                     == "upstream access forbidden, please contact administrator"):
                                 label = "上游禁止访问，需要服务管理员处理后再继续"
                     return ProviderOutcome("uncertain", diagnostic_message(

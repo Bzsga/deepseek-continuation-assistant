@@ -59,8 +59,13 @@ def execute(settings, monkeypatch, raw, *, partial=False, encoding="identity"):
     return outcome, trace
 
 
-def test_exact_upstream_access_denial_is_safe_and_preserves_accounting(settings, monkeypatch, caplog):
-    raw = json.dumps({"error": {"message": KNOWN_MESSAGE, "private": PRIVATE_MARKER}}).encode()
+@pytest.mark.parametrize("message", [
+    KNOWN_MESSAGE,
+    "Upstream access forbidden, please contact administrator",
+    " \nUpstream access forbidden, please contact administrator\t ",
+])
+def test_exact_upstream_access_denial_is_safe_and_preserves_accounting(settings, monkeypatch, caplog, message):
+    raw = json.dumps({"error": {"message": message, "private": PRIVATE_MARKER}}).encode()
     outcome, trace = execute(settings, monkeypatch, raw)
     assert SAFE_LABEL in outcome.message
     assert trace.body_read_complete and not trace.response_truncated
@@ -84,8 +89,9 @@ def test_exact_upstream_access_denial_is_safe_and_preserves_accounting(settings,
 
 
 @pytest.mark.parametrize("raw", [
-    json.dumps({"error": {"message": KNOWN_MESSAGE + " "}}).encode(),
+    json.dumps({"error": {"message": KNOWN_MESSAGE + " for another account"}}).encode(),
     json.dumps({"error": {"message": PRIVATE_MARKER}}).encode(),
+    json.dumps({"error": {"message": [KNOWN_MESSAGE]}}).encode(),
     json.dumps({"error": KNOWN_MESSAGE}).encode(),
     json.dumps({"message": KNOWN_MESSAGE}).encode(),
     json.dumps([{"error": {"message": KNOWN_MESSAGE}}]).encode(),
