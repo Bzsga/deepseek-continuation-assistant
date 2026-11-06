@@ -1051,6 +1051,19 @@ async def _organize(settings: Settings, snapshot, messages, trace, *, context_me
                 if response.status_code != 200:
                     await read_error_body(response, raw=response.headers.get("content-encoding", "identity") != "identity")
                     label = {502: "上游网关异常", 503: "上游服务暂不可用", 504: "上游网关超时"}.get(http_status, "上游请求失败")
+                    if (body_read_complete and not trace.response_truncated
+                            and response.headers.get("content-encoding", "identity") == "identity"):
+                        try:
+                            error_document = json.loads(data, object_pairs_hook=_unique_json_pairs,
+                                                        parse_constant=_reject_json_constant)
+                        except (ValueError, UnicodeError, RecursionError):
+                            pass
+                        else:
+                            if (isinstance(error_document, dict)
+                                    and isinstance(error_document.get("error"), dict)
+                                    and error_document["error"].get("message")
+                                    == "upstream access forbidden, please contact administrator"):
+                                label = "上游禁止访问，需要服务管理员处理后再继续"
                     return ProviderOutcome("uncertain", diagnostic_message(
                         f"[transport] {label}（HTTP {http_status}）。请求结果尚未确认，本次次数已计入用量，费用预留已保留，不会自动重试。",
                         diagnostics()), [])
