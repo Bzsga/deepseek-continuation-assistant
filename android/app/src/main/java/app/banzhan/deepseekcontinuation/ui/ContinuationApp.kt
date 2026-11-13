@@ -73,6 +73,7 @@ fun ContinuationApp(
     var batchIds by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
     var batchNumber by rememberSaveable { mutableIntStateOf(0) }
     var selectionTargetId by rememberSaveable { mutableStateOf<String?>(null) }
+    var importTargetArchiveId by rememberSaveable { mutableStateOf<String?>(null) }
     var advancedBranchId by rememberSaveable { mutableStateOf<String?>(null) }
     var serviceReturn by rememberSaveable { mutableStateOf("prepare") }
     var developerReturn by rememberSaveable { mutableStateOf("settings") }
@@ -83,6 +84,8 @@ fun ContinuationApp(
     var pendingDocumentMessage by rememberSaveable { mutableStateOf("") }
     var exportArchive by remember { mutableStateOf<Archive?>(null) }
     var politicalArchiveId by rememberSaveable { mutableStateOf<String?>(null) }
+    var repairArchiveId by rememberSaveable { mutableStateOf<String?>(null) }
+    var quickArchive by remember { mutableStateOf<Archive?>(null) }
     var aiRequest by remember { mutableStateOf<AiRequest?>(null) }
     var reorganizationPlan by remember { mutableStateOf<ReorganizationPlan?>(null) }
     var reorganizationSourceId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -125,7 +128,17 @@ fun ContinuationApp(
     fun imported(ids: List<String>) {
         batchIds = ArrayList(ids)
         batchNumber++
-        if (ids.size == 1) prepare(ids.first()) else route = "choose"
+        val target = importTargetArchiveId?.takeIf { id -> state.archives.any { it.id == id } }
+        importTargetArchiveId = null
+        if (target != null) {
+            archiveId = target
+            selectionTargetId = target
+            advancedBranchId = null
+            if (ids.size == 1) {
+                conversationId = ids.first()
+                route = "selection"
+            } else route = "choose_incremental"
+        } else if (ids.size == 1) prepare(ids.first()) else route = "choose"
     }
     fun openRecord(id: String) {
         archiveId = id
@@ -194,6 +207,7 @@ fun ContinuationApp(
         route =
             when (route) {
                 "archive" -> "result"
+                "add_recent", "choose_incremental" -> "result"
                 "selection" -> if (selectionTargetId != null) "archive" else "prepare"
                 "reorganization_selection" -> {
                     val original = state.archives.firstOrNull { it.id == reorganizationSourceId }
@@ -320,6 +334,7 @@ fun ContinuationApp(
                     val document = withContext(Dispatchers.IO) { readDocument(context, uri) }
                     imported(controller.importFile(document.second, document.first))
                 }
+            else importTargetArchiveId = null
         }
     val saveMarkdown =
         rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) {
@@ -345,7 +360,8 @@ fun ContinuationApp(
                     }
                 }
         }
-    val import: () -> Unit = {
+    fun launchImport(targetArchiveId: String? = null) {
+        importTargetArchiveId = targetArchiveId
         try {
             importLauncher.launch(
                 arrayOf(
@@ -357,13 +373,16 @@ fun ContinuationApp(
                 )
             )
         } catch (_: android.content.ActivityNotFoundException) {
+            importTargetArchiveId = null
             run { snackbars.showSnackbar("无法打开文件选择器，请从浏览器下载记录分享 ZIP 到本应用。") }
         }
     }
+    val import: () -> Unit = { launchImport() }
     val importingSharedFile = incomingImport?.status == IncomingImportStatus.IMPORTING
     val busy = state.busy || submitting || reorganizationLoading || importingSharedFile || installPreparing
     val politicalRunning = politicalState.task?.status in setOf("queued", "running")
-    val existingModal = aiRequest != null || exportArchive != null || politicalArchiveId != null || restoreConfirmation || reorganizationPlan != null || reorganizationLoading
+    val existingModal = aiRequest != null || exportArchive != null || politicalArchiveId != null ||
+        quickArchive != null || repairArchiveId != null || restoreConfirmation || reorganizationPlan != null || reorganizationLoading
     val incomingBlocked =
         busy || existingModal || politicalRunning || state.tasks.any { it.status in setOf("queued", "running") }
     fun installationBlocker(): String? {
@@ -376,6 +395,7 @@ fun ContinuationApp(
             aiRequest != null ||
                 exportArchive != null ||
                 politicalArchiveId != null ||
+                quickArchive != null || repairArchiveId != null ||
                 reorganizationPlan != null ||
                 restoreConfirmation ||
                 getRecordsVisible -> "请先完成当前页面操作，再安装更新。"
@@ -599,6 +619,14 @@ fun ContinuationApp(
                                 ) {
                                     prepare(it)
                                 }
+                            "add_recent", "choose_incremental" ->
+                                ConversationPickerScreen(
+                                    if (route == "choose_incremental") state.conversations.filter { it.id in batchIds }
+                                    else state.conversations,
+                                    title = "补入最近聊天",
+                                    detail = "仅整理新增消息，必要时参考此前已选原文。相同内容会跳过，保留你的修改。",
+                                    onImport = { launchImport(archiveId) },
+                                ) { advancedConversation(it, target = archiveId) }
                             "reorganization_choose" -> {
                                 val original = state.archives.firstOrNull { it.id == reorganizationSourceId }
                                 val related = state.conversations.filter { it.id in original?.conversationIds.orEmpty() }
@@ -657,6 +685,14 @@ fun ContinuationApp(
                                         preparationError,
                                         onStart = { begin(conversation, it, true) },
                                         onOriginal = { begin(conversation, it, false) },
+                                        onQuick = { choice ->
+                                            run {
+                                                quickArchive = withContext(Dispatchers.Default) {
+                                                    QuickContinuation.fromSelection(conversation, choice.branchId,
+                                                        choice.selectedIds, choice.title, choice.background)
+                                                }
+                                            }
+                                        },
                                         onService = { service("prepare") },
                                         onQuotaRefresh = { run { controller.refreshQuota() } },
                                         estimateMessages = controller::estimateForCurrentService,
@@ -741,6 +777,9 @@ fun ContinuationApp(
                                         onReorganize = { requestReorganization(archive.id) },
                                         onOpenRecord = { openRecord(it) },
                                         onPoliticalExport = { politicalArchiveId = archive.id },
+                                        onRepair = { repairArchiveId = archive.id },
+                                        onQuick = { quickArchive = archive },
+                                        onAddRecent = { route = "add_recent" },
                                     )
                             }
                             "paste" ->
@@ -773,6 +812,7 @@ fun ContinuationApp(
                                             submitting = true
                                             run {
                                                 try {
+                                                    var effectiveIds = ids
                                                     val id =
                                                         if (target == null)
                                                             controller.createArchive(
@@ -784,27 +824,31 @@ fun ContinuationApp(
                                                                 includeRawEntries = !ai,
                                                             )
                                                         else {
-                                                            controller.addConversation(
+                                                            val addition = controller.addConversation(
                                                                 target,
                                                                 conversation,
                                                                 branch,
                                                                 ids,
+                                                                includeRawEntries = !ai,
                                                             )
+                                                            effectiveIds = addition.messageIds.toSet()
+                                                            if (addition.alreadyIncludedCount > 0)
+                                                                snackbars.showSnackbar(addition.notice)
                                                             target
                                                         }
                                                     archiveId = id
                                                     route = "archive"
-                                                    if (ai)
+                                                    if (ai && effectiveIds.isNotEmpty())
                                                         aiRequest =
                                                             AiRequest(
                                                                 id,
                                                                 conversation.id,
                                                                 branch,
-                                                                ids,
+                                                                effectiveIds,
                                                                 conversation.branches
                                                                     .first { it.id == branch }
                                                                     .messages
-                                                                    .filter { it.id in ids },
+                                                                    .filter { it.id in effectiveIds },
                                                             )
                                                 } finally {
                                                     submitting = false
@@ -829,6 +873,8 @@ fun ContinuationApp(
                                         onReorganize = { requestReorganization(archive.id) },
                                         onOpenRecord = { openRecord(it) },
                                         onPoliticalExport = { politicalArchiveId = archive.id },
+                                        onRepair = { repairArchiveId = archive.id },
+                                        onAddRecent = { route = "add_recent" },
                                     )
                             }
                             "settings",
@@ -913,6 +959,36 @@ fun ContinuationApp(
                     }
                 },
             )
+        quickArchive?.let { snapshot ->
+            val latest = state.archives.firstOrNull { it.id == snapshot.id } ?: snapshot
+            QuickContinuationDialog(
+                latest, state.conversations,
+                onDismiss = { quickArchive = null },
+                onCopyAndOpen = { text -> run {
+                    require(text.toByteArray(Charsets.UTF_8).size <= 60 * 1024) { "内容较长，请保存文件。" }
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(ClipData.newPlainText("快速续聊", text))
+                    openDeepSeek(context)
+                } },
+                onSave = { text -> run {
+                    stageDocument(text, "快速续聊文件已保存，请在 DeepSeek 新对话中添加。")
+                    saveContinuation.launch(safeFileName(latest.title) + "-快速续聊.txt")
+                } },
+            )
+        }
+        repairArchiveId?.let { id ->
+            val archive = state.archives.firstOrNull { it.id == id }
+            if (archive != null) ContinuityRepairDialog(
+                archive, state.conversations,
+                onDismiss = { repairArchiveId = null },
+                onCopy = { text -> run {
+                    require(text.toByteArray(Charsets.UTF_8).size <= 60 * 1024) { "修正内容过长，请精简补充内容。" }
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(ClipData.newPlainText("续聊修正", text))
+                    snackbars.showSnackbar("修正内容已复制，请回到正在聊的 DeepSeek 会话粘贴。")
+                } },
+            ) else LaunchedEffect(id) { repairArchiveId = null }
+        }
         politicalArchiveId?.let { id ->
             val archive = state.archives.firstOrNull { it.id == id }
             if (archive != null) PoliticalExportDialog(
@@ -1316,7 +1392,7 @@ private fun OrganizationDialog(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (settings.mode == "companion")
-                    Text("免费使用，预计需要 ${value.chunks} 次模型请求，服务端会检查个人与全站剩余次数。")
+                    Text("免费使用，预计需要 ${state.quota.requestCountText(value.chunks)} 次模型请求，服务端会检查个人与全站剩余次数。")
                 else if (value.estimatedCost != null)
                     Text("按填写单价保守估算约 ${"%.4f".format(value.estimatedCost)}（与单价同币种）。实际费用以服务商账单为准。")
                 else Text("尚未填写单价，无法估算费用。该服务会按实际使用计费，可在设置中补充价格。")

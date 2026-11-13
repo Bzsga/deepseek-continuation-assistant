@@ -32,6 +32,7 @@ data class PoliticalExportPlan(
     val originalText: String,
     val estimate: OrganizationEstimate,
     val serviceMode: String,
+    val maxAttemptsPerChunk: Int = 1,
 )
 
 @Serializable
@@ -164,7 +165,8 @@ class PoliticalExportManager internal constructor(
                 val cost = if (captured.mode == "byok" && captured.inputPricePerMillion != null && captured.outputPricePerMillion != null)
                     (input * captured.inputPricePerMillion + output * captured.outputPricePerMillion) / 1_000_000.0 else null
                 val plan = PoliticalExportPlan(UUID.randomUUID().toString(), archiveId, text,
-                    OrganizationEstimate(batches.size, input, output, cost), captured.mode)
+                    OrganizationEstimate(batches.size, input, output, cost), captured.mode,
+                    if (captured.mode == "companion") quota?.fallbackAttemptLimit ?: 1 else 1)
                 prepared = Prepared(plan, captured, batches)
                 mutableState.update { it.copy(error = null) }
                 plan

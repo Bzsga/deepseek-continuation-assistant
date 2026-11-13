@@ -21,6 +21,21 @@ RUNTIME_FIELDS = {
     "context_tokens", "max_output_tokens", "provider_timeout_seconds",
 }
 
+# Primary requests retain the historical jobs count. Attempt zero supplies its
+# own usage when present; backups add independent counts and usage. Keep this
+# as a CTE rather than a schema view so legacy column migrations stay possible.
+PROVIDER_REQUEST_USAGE_SQL = """
+    SELECT j.id AS job_id,j.owner_id,j.count_day,
+        CASE WHEN a.id IS NULL THEN j.usage_known ELSE a.usage_known END AS usage_known,
+        CASE WHEN a.id IS NULL THEN j.input_tokens ELSE a.input_tokens END AS input_tokens,
+        CASE WHEN a.id IS NULL THEN j.output_tokens ELSE a.output_tokens END AS output_tokens
+    FROM jobs AS j LEFT JOIN provider_attempts AS a ON a.job_id=j.id AND a.ordinal=0
+    WHERE j.count_state='used'
+    UNION ALL
+    SELECT a.job_id,j.owner_id,a.count_day,a.usage_known,a.input_tokens,a.output_tokens
+    FROM provider_attempts AS a JOIN jobs AS j ON j.id=a.job_id WHERE a.ordinal>0
+"""
+
 
 def local_day(timestamp=None):
     return datetime.fromtimestamp(time.time() if timestamp is None else timestamp, SHANGHAI).date().isoformat()
@@ -39,6 +54,17 @@ def configuration_fingerprint(settings):
         "input_price": str(settings.input_price_per_million),
         "output_price": str(settings.output_price_per_million),
     }
+    routes = getattr(settings, "fallback_providers", ())
+    order = getattr(settings, "provider_route_order", ())
+    if routes or (order and tuple(order) != ("primary",)):
+        value["fallback_providers"] = [{
+            "id": route.id, "base_url": route.base_url, "model": route.model,
+            "api_key_hash": digest(route.api_key), "timeout_seconds": route.timeout_seconds,
+            "context_tokens": route.context_tokens, "max_output_tokens": route.max_output_tokens,
+        } for route in routes]
+        value["provider_route_order"] = list(order)
+        value["fallback_slow_seconds"] = getattr(settings, "fallback_slow_seconds", 30)
+        value["fallback_cooldown_seconds"] = getattr(settings, "fallback_cooldown_seconds", 300)
     return digest(json.dumps(value, sort_keys=True))
 
 
@@ -116,6 +142,16 @@ class Store:
                     day TEXT NOT NULL, last_seen REAL NOT NULL,
                     PRIMARY KEY(user_id, day)
                 );
+                CREATE TABLE IF NOT EXISTS provider_attempts (
+                    id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id),
+                    ordinal INTEGER NOT NULL CHECK(ordinal>=0), route_id TEXT NOT NULL,
+                    base_url TEXT NOT NULL, model TEXT NOT NULL,
+                    status TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL,
+                    count_day TEXT NOT NULL, usage_known INTEGER NOT NULL DEFAULT 0,
+                    input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(job_id,ordinal), UNIQUE(job_id,route_id)
+                );
+                CREATE INDEX IF NOT EXISTS provider_attempts_daily ON provider_attempts(count_day,ordinal);
             """)
             db.execute("BEGIN IMMEDIATE")
             user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
@@ -190,22 +226,22 @@ class Store:
     def daily_quota(self, db, owner_id=None, settings=None, timestamp=None):
         settings = settings or self._settings(db)
         now = time.time() if timestamp is None else timestamp
-        row = db.execute("""SELECT
-            COALESCE(SUM(CASE WHEN count_state='used' AND count_day=? THEN 1 ELSE 0 END),0) AS used,
-            COALESCE(SUM(CASE WHEN count_state='reserved' THEN 1 ELSE 0 END),0) AS reserved,
-            COALESCE(SUM(CASE WHEN owner_id=? AND count_state='used' AND count_day=? THEN 1 ELSE 0 END),0) AS user_used,
-            COALESCE(SUM(CASE WHEN owner_id=? AND count_state='reserved' THEN 1 ELSE 0 END),0) AS user_reserved
-            FROM jobs""", (local_day(now), owner_id, local_day(now), owner_id)).fetchone()
+        row = db.execute(f"""WITH provider_request_usage AS ({PROVIDER_REQUEST_USAGE_SQL}) SELECT COUNT(*) AS used,
+            COALESCE(SUM(CASE WHEN owner_id=? THEN 1 ELSE 0 END),0) AS user_used
+            FROM provider_request_usage WHERE count_day=?""", (owner_id, local_day(now))).fetchone()
+        reserved = db.execute("""SELECT COUNT(*) AS reserved,
+            COALESCE(SUM(CASE WHEN owner_id=? THEN 1 ELSE 0 END),0) AS user_reserved
+            FROM jobs WHERE count_state='reserved'""", (owner_id,)).fetchone()
         result = {
-            "daily_limit": settings.daily_limit, "daily_used": row["used"], "daily_reserved": row["reserved"],
-            "daily_remaining": max(0, settings.daily_limit - row["used"] - row["reserved"]),
+            "daily_limit": settings.daily_limit, "daily_used": row["used"], "daily_reserved": reserved["reserved"],
+            "daily_remaining": max(0, settings.daily_limit - row["used"] - reserved["reserved"]),
             "reset_at": reset_at(now),
         }
         if owner_id is not None:
             result.update({
                 "user_daily_limit": settings.user_daily_limit, "user_daily_used": row["user_used"],
-                "user_daily_reserved": row["user_reserved"],
-                "user_daily_remaining": max(0, settings.user_daily_limit - row["user_used"] - row["user_reserved"]),
+                "user_daily_reserved": reserved["user_reserved"],
+                "user_daily_remaining": max(0, settings.user_daily_limit - row["user_used"] - reserved["user_reserved"]),
             })
         return result
 
@@ -303,6 +339,9 @@ class Store:
             message = "今日整理次数已用完或已被排队任务预留，北京时间次日零点重置"
         if settings.mock_mode:
             message = "模拟模式，仅验证流程，不调用真实模型" if enabled else "模拟模式预算尚未配置完整"
+        automatic_fallback = bool(getattr(settings, "fallback_providers", ())) and (
+            access_mode == "public" and not settings.cost_known and not settings.mock_mode
+        )
         return {"enabled": enabled, "remaining_cny": max(0, remaining) / 1_000_000,
                 "per_job_limit_cny": per_job / 1_000_000,
                 "model": settings.display_model, "mock_mode": settings.mock_mode,
@@ -310,6 +349,8 @@ class Store:
                 "context_tokens": settings.context_tokens, "max_output_tokens": settings.max_output_tokens,
                 "organization_protocol_version": CURRENT_PROTOCOL_VERSION,
                 "political_filter_supported": True,
+                "automatic_fallback_enabled": automatic_fallback,
+                "max_attempts_per_chunk": 1 + len(settings.fallback_providers) if automatic_fallback else 1,
                 "message": message, "remaining_micros": max(0, remaining), "per_job_micros": per_job,
                 **daily}
 
@@ -433,6 +474,78 @@ class Store:
                 claimed["execution_settings"] = settings
                 return claimed
 
+    def begin_provider_attempt(self, job_id, route_metadata):
+        """Commit one never-replayed dispatch before its network operation.
+
+        Metadata contains only ordinal/id/base_url/model. Route credentials stay
+        in the worker's immutable execution settings, never in this ledger.
+        """
+        if not isinstance(route_metadata, dict):
+            return None
+        ordinal = route_metadata.get("ordinal")
+        route_id = route_metadata.get("id")
+        if type(ordinal) is not int or ordinal < 0 or not isinstance(route_id, str):
+            return None
+        now = time.time()
+        with self.connection(write=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None or row["status"] != "running" or row["cancel_requested"]:
+                return None
+            settings = self._settings(db)
+            snapshot = json.loads(row["provider"])
+            if snapshot.get("configuration_fingerprint") != configuration_fingerprint(settings):
+                return None
+            if route_metadata.get("configuration_fingerprint", snapshot["configuration_fingerprint"]) != snapshot["configuration_fingerprint"]:
+                return None
+            routes = {"primary": (settings.base_url, settings.model)}
+            routes.update({route.id: (route.base_url, route.model) for route in getattr(settings, "fallback_providers", ())})
+            if routes.get(route_id) != (route_metadata.get("base_url"), route_metadata.get("model")):
+                return None
+            if ordinal >= len(routes):
+                return None
+            previous = db.execute("SELECT ordinal,route_id FROM provider_attempts WHERE job_id=? ORDER BY ordinal", (job_id,)).fetchall()
+            if ordinal != len(previous) or any(attempt["route_id"] == route_id for attempt in previous):
+                return None
+            quota = self._quota(db, row["owner_id"], settings, now)
+            if not quota["enabled"] or snapshot.get("access_mode") != quota["access_mode"]:
+                return None
+            if (quota["daily_used"] + quota["daily_reserved"] > settings.daily_limit
+                    or quota["user_daily_used"] + quota["user_daily_reserved"] > settings.user_daily_limit):
+                return None
+            # Automatic alternatives are limited to unpriced public count mode.
+            # Historical monetary reservations retain their single-route path.
+            if (ordinal > 0 or route_id != "primary") and (
+                snapshot.get("access_mode") != "public" or prices_configured(snapshot) or settings.cost_known
+            ):
+                return None
+            if ordinal > 0:
+                if quota["daily_remaining"] <= 0 or quota["user_daily_remaining"] <= 0:
+                    return None
+            attempt_id = str(uuid.uuid4())
+            db.execute("""INSERT INTO provider_attempts(id,job_id,ordinal,route_id,base_url,model,status,started_at,count_day)
+                VALUES(?,?,?,?,?,?,'dispatched',?,?)""",
+                       (attempt_id, job_id, ordinal, route_id, route_metadata["base_url"], route_metadata["model"], now,
+                        row["count_day"] if ordinal == 0 else local_day(now)))
+            return attempt_id
+
+    def finish_provider_attempt(self, attempt_id, outcome, status_override=None):
+        status = status_override if status_override is not None else outcome.status
+        if status not in TERMINAL:
+            raise ValueError("Invalid provider attempt status")
+        input_tokens, output_tokens = outcome.input_tokens, outcome.output_tokens
+        valid_usage = all(type(value) is int and 0 <= value <= 1_000_000_000 for value in (input_tokens, output_tokens))
+        known = bool(outcome.usage_known) and valid_usage
+        if not valid_usage:
+            input_tokens = output_tokens = 0
+        with self.connection(write=True) as db:
+            db.execute("""UPDATE provider_attempts SET status=?,finished_at=?,usage_known=?,input_tokens=?,output_tokens=?
+                WHERE id=? AND status='dispatched'""",
+                       (status, time.time(), int(known), input_tokens, output_tokens, attempt_id))
+
+    def provider_attempts(self, job_id):
+        with self.connection() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM provider_attempts WHERE job_id=? ORDER BY ordinal", (job_id,))]
+
     def finish(self, job_id, outcome):
         now = time.time()
         with self.connection(write=True) as db:
@@ -458,6 +571,7 @@ class Store:
     def recover_running(self):
         now = time.time()
         with self.connection(write=True) as db:
+            db.execute("UPDATE provider_attempts SET status='uncertain',finished_at=? WHERE status='dispatched'", (now,))
             db.execute("""UPDATE jobs SET status='uncertain',message=?,terminal_at=?,expires_at=? WHERE status='running'""",
                        ("服务曾中断，调用结果无法确认，费用预留已保留；不会自动重试", now, now + DAY))
 

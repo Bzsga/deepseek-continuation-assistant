@@ -9,6 +9,7 @@ internal data class ContinuityCandidate(
     val pinned: Boolean = false,
     val explicitlySelected: Boolean = false,
     val characterCount: Int = 0,
+    val focusScore: Int = 0,
 )
 
 /**
@@ -35,11 +36,15 @@ internal fun chooseContinuityCandidates(
     }.toMutableSet()
 
     while (chosen.size < limit.coerceAtLeast(0) && remaining.isNotEmpty()) {
+        val hasFocusedChoice = chosen.any { it.focusScore > 0 }
         val next = remaining.minWithOrNull(
             compareByDescending<ContinuityCandidate> { it.pinned }
+                // Give the current topic one place, then retain representative feature coverage.
+                .thenByDescending { !hasFocusedChoice && it.focusScore > 0 }
                 .thenByDescending { candidate ->
                     candidate.featureKeys.count { (candidate.branchKey to it) !in covered }
                 }
+                .thenByDescending { it.focusScore.coerceAtLeast(0) }
                 .then(tieBreak)
         ) ?: break
         chosen += next

@@ -25,7 +25,7 @@ DEFAULT_TTL_SECONDS = 86400
 MAX_TTL_SECONDS = 7 * DEFAULT_TTL_SECONDS
 SNAPSHOT_FIELDS = {"model", "mock_mode", "input_price", "output_price", "input_bound",
                    "output_bound", "protocol_version", "access_mode", "operation"}
-REQUEST_FIELDS = {"model", "messages", "max_tokens", "stream", "response_format", "thinking",
+REQUEST_FIELDS = {"model", "messages", "max_tokens", "max_completion_tokens", "stream", "response_format", "thinking",
                   "reasoning_effort", "temperature", "top_p", "frequency_penalty",
                   "presence_penalty", "stop", "seed"}
 FORBIDDEN_KEYS = {"headers", "authorization", "url", "baseurl", "settings", "apikey",
@@ -75,6 +75,7 @@ class ArtifactError(ValueError):
 
 @dataclass
 class ProviderTrace:
+    confirmed_outcome: object | None = field(default=None, repr=False)
     request: dict | None = field(default=None, repr=False)
     response_body: bytearray = field(default_factory=bytearray, repr=False)
     http_status: int | None = None
@@ -92,6 +93,7 @@ class ProviderTrace:
     _ended_at: float | None = field(default=None, repr=False)
 
     def begin(self):
+        self.confirmed_outcome = None
         self.request = None
         self.response_body.clear()
         self.http_status = None
@@ -148,7 +150,7 @@ class ProviderTrace:
             "network_events": {name: elapsed for name, elapsed in self.network_events.items()
                                if name in NETWORK_EVENTS and type(elapsed) is int and 0 <= elapsed <= 1_000_000_000},
         }
-        if type(self.prompt_version) is int and self.prompt_version in {1, 2, 3, 4, 5, 6, 7, 8}:
+        if type(self.prompt_version) is int and self.prompt_version in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
             result["prompt_version"] = self.prompt_version
         return result
 

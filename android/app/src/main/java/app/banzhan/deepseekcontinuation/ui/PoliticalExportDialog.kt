@@ -20,6 +20,8 @@ import app.banzhan.deepseekcontinuation.core.ArchiveLogic
 import app.banzhan.deepseekcontinuation.core.ImportedConversation
 import app.banzhan.deepseekcontinuation.data.AppController
 import app.banzhan.deepseekcontinuation.data.PoliticalExportPlan
+import app.banzhan.deepseekcontinuation.data.automaticFallbackNotice
+import app.banzhan.deepseekcontinuation.data.companionRequestCountText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -261,7 +263,10 @@ internal fun PoliticalExportDialog(
 
 private fun politicalEstimateText(plan: PoliticalExportPlan): String {
     val count = plan.estimate.chunks
-    return if (plan.serviceMode == "companion") "预计 $count 次检查，使用 $count 次免费额度。"
+    return if (plan.serviceMode == "companion") {
+        "预计 $count 段检查，使用 ${companionRequestCountText(count, plan.maxAttemptsPerChunk)} 次免费额度。" +
+            if (plan.maxAttemptsPerChunk > 1) "\n${automaticFallbackNotice(plan.maxAttemptsPerChunk)}" else ""
+    }
     else plan.estimate.estimatedCost?.let { "预计 $count 次请求，按所填单价保守估算约 ${"%.4f".format(it)}，实际以服务商账单为准。" }
         ?: "预计 $count 次请求，费用由当前服务商计费。"
 }

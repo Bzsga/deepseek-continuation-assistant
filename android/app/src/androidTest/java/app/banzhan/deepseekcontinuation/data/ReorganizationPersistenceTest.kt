@@ -247,7 +247,7 @@ class ReorganizationPersistenceTest {
             completed(controller, start.taskId)
             controller.deleteArchive(archive.id)
             val document = backup(controller)
-            assertEquals(5, document.version)
+            assertEquals(6, document.version)
             BackupValidation.validate(document)
             val childBeforeRestore = controller.state.value.archives.single()
             assertEquals(archive.id, childBeforeRestore.rebuiltFromArchiveId)

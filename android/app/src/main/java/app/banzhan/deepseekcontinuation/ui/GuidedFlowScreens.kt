@@ -51,6 +51,7 @@ internal fun ConversationPickerScreen(
     conversations: List<ImportedConversation>,
     title: String = "想接着聊哪一段？",
     detail: String = "默认选中这段聊天的全部消息。",
+    onImport: (() -> Unit)? = null,
     onSelect: (String) -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
@@ -65,6 +66,10 @@ internal fun ConversationPickerScreen(
     ) {
         item { FlowSteps(1) }
         item { SectionTitle(title, detail) }
+        onImport?.let { import -> item {
+            OutlinedButton(onClick = import) { Text("导入最近导出的记录") }
+            Text("也可以直接选择下面已经导入的聊天。", style = MaterialTheme.typography.bodySmall)
+        } }
         item {
             OutlinedTextField(
                 query,
@@ -135,6 +140,7 @@ internal fun PreparationScreen(
     estimateMessages: (List<ChatMessage>) -> OrganizationEstimate,
     onAdvanced: (String?) -> Unit,
     onSavedTask: (String) -> Unit,
+    onQuick: ((PreparationChoice) -> Unit)? = null,
 ) {
     val settings = state.settings
     var branchId by
@@ -283,7 +289,7 @@ internal fun PreparationScreen(
                 )
                 Text(
                     if (messages.isEmpty()) "选择消息后会显示所需请求次数。"
-                    else estimate?.getOrNull()?.let { "预计分为 ${it.chunks} 段，约需 ${it.chunks} 次模型请求。" }
+                    else estimate?.getOrNull()?.let { "预计分为 ${it.chunks} 段，约需 ${state.quota.requestCountText(it.chunks)} 次模型请求。" }
                         ?: if (state.quotaLoading || estimate == null) "正在确认分段请求次数。"
                         else "暂未能估算请求次数，请刷新额度后再试。",
                     style = MaterialTheme.typography.bodySmall,
@@ -295,7 +301,7 @@ internal fun PreparationScreen(
                     listOfNotNull(state.quota?.userDailyRemaining, state.quota?.dailyRemaining)
                         .minOrNull()
                 val requests = estimate?.getOrNull()?.chunks
-                if (available != null && requests != null && requests > available) {
+                if (available != null && requests != null && state.quota.requestUpperBound(requests) > available) {
                     Text(
                         if (available == 0) "当前免费次数已用完。已完成的进度会保留，次数更新后可继续。"
                         else "按当前剩余次数，今天可能只能完成部分内容。进度会自动保存，次数更新后可继续。",
@@ -333,9 +339,12 @@ internal fun PreparationScreen(
                 }
         }
         item {
-            OutlinedButton(onClick = { onOriginal(choice) }, enabled = canStart) { Text("先带走原文") }
+            if (onQuick != null)
+                OutlinedButton(onClick = { onQuick(choice) }, enabled = canStart) { Text("先快速接续") }
+            else OutlinedButton(onClick = { onOriginal(choice) }, enabled = canStart) { Text("先带走原文") }
             Text(
-                "本机处理，无需 AI。保留原文长度，内容较长时会建议保存文件。",
+                if (onQuick != null) "无需等待 AI，先用最近原话继续聊。完整整理可以稍后进行。"
+                else "本机处理，无需 AI。保留原文长度，内容较长时会建议保存文件。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -347,6 +356,10 @@ internal fun PreparationScreen(
             }
         }
         if (options) {
+            if (onQuick != null) item {
+                TextButton(onClick = { onOriginal(choice) }, enabled = canStart) { Text("带走所选完整原文") }
+                Text("本机打包，不缩短所选内容。", style = MaterialTheme.typography.bodySmall)
+            }
             item {
                 OutlinedTextField(
                     title,
@@ -624,6 +637,9 @@ internal fun ContinuationResultScreen(
     onReorganize: () -> Unit = {},
     onOpenRecord: (String) -> Unit = {},
     onPoliticalExport: () -> Unit = {},
+    onRepair: () -> Unit = {},
+    onQuick: (() -> Unit)? = null,
+    onAddRecent: (() -> Unit)? = null,
 ) {
     var export by remember(archive, conversations) { mutableStateOf<Result<ExportResult>?>(null) }
     var large by remember(archive, conversations) { mutableStateOf(false) }
@@ -732,14 +748,19 @@ internal fun ContinuationResultScreen(
                 if (hasReorganizationNavigation) {
                     ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
                 }
+                ActionRow {
+                TextButton(onClick = onRepair) { Text("没接上？调整一下") }
                 TextButton(onClick = { showMoreActions = !showMoreActions }) {
                     Icon(if (showMoreActions) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
                         null, Modifier.size(18.dp))
                     Text(if (showMoreActions) "收起更多选项" else "调整与更多")
                 }
+                }
                 if (showMoreActions) {
                     ContinuitySetupCard(archive, conversations, onSaveContinuity)
                     ActionRow {
+                        onAddRecent?.let { add -> TextButton(onClick = add) { Text("补入最近聊天") } }
+                        onQuick?.let { quick -> TextButton(onClick = quick) { Text("使用快速版") } }
                         if (archive.generationMode == "summary") {
                             OutlinedButton(onClick = onPoliticalExport, enabled = !busy) { Text("生成温和版") }
                         }

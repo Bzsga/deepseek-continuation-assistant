@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from .failure_artifacts import ArtifactStore, ProviderTrace
+from .failover import execution_timeout, fallback_enabled, organize_with_fallback
 from .provider import ProviderOutcome, diagnostic_message, organize, response_diagnostics
 
 
@@ -141,9 +142,12 @@ class Runner:
                         value for settings in (self.settings, execution_settings)
                         for name in ("api_key", "admin_token", "feedback_worker_token", "admin_password_hash")
                         if (value := getattr(settings, name, ""))
-                    )
+                    ) + tuple(route.api_key for route in execution_settings.fallback_providers)
+                    capture_snapshot = dict(snapshot)
+                    if isinstance(trace.request, dict) and isinstance(trace.request.get("model"), str):
+                        capture_snapshot["model"] = trace.request["model"]
                     saved = self.artifacts.save(
-                        row["id"], trace, snapshot, messages, outcome.status, outcome.message,
+                        row["id"], trace, capture_snapshot, messages, outcome.status, outcome.message,
                         secrets=secrets, ttl_seconds=self.settings.failure_artifacts_ttl_hours * 3600,
                         **({"context_messages": context_messages} if context_messages else {}),
                     )
@@ -192,14 +196,23 @@ class Runner:
                 snapshot = json.loads(row["provider"])
                 messages, context_messages = source_payload(row["payload"], operation=snapshot.get("operation", "organize"))
                 try:
+                    if fallback_enabled(execution_settings, snapshot):
+                        operation = organize_with_fallback(
+                            execution_settings, snapshot, messages, store=self.store, job_id=row["id"],
+                            trace=trace, organize_one=organize,
+                            **({"context_messages": context_messages} if context_messages else {}),
+                        )
+                    else:
+                        operation = organize(execution_settings, snapshot, messages, trace=trace,
+                                             **({"context_messages": context_messages} if context_messages else {}))
                     outcome = await asyncio.wait_for(
-                        organize(execution_settings, snapshot, messages, trace=trace,
-                                 **({"context_messages": context_messages} if context_messages else {})),
-                        timeout=execution_settings.provider_timeout_seconds,
+                        operation, timeout=execution_timeout(execution_settings, snapshot),
                     )
                 except asyncio.TimeoutError:
                     trace.finish("total_timeout")
-                    outcome = ProviderOutcome("uncertain", "[runner_timeout] 请求达到总时限，本次次数已计入用量，不会自动重试", [])
+                    outcome = trace.confirmed_outcome if isinstance(trace.confirmed_outcome, ProviderOutcome) else None
+                    if outcome is None or outcome.status != "completed":
+                        outcome = ProviderOutcome("uncertain", "[runner_timeout] 请求达到总时限，本次次数已计入用量，不会自动重试", [])
                 finalizing = asyncio.create_task(self._finish_job(row, snapshot, messages, execution_settings, trace, outcome,
                                                                  **({"context_messages": context_messages} if context_messages else {})))
                 await asyncio.shield(finalizing)
@@ -222,7 +235,9 @@ class Runner:
                             messages, context_messages = source_payload(row["payload"], operation=snapshot.get("operation", "organize"))
                     if row is not None:
                         trace.finish("cancelled")
-                        outcome = ProviderOutcome("uncertain", "服务停止时调用尚未确认，费用预留已保留；不会自动重试", [])
+                        outcome = trace.confirmed_outcome if isinstance(trace.confirmed_outcome, ProviderOutcome) else None
+                        if outcome is None or outcome.status != "completed":
+                            outcome = ProviderOutcome("uncertain", "服务停止时调用尚未确认，费用预留已保留；不会自动重试", [])
                         await self._finish_job(row, snapshot, messages, execution_settings, trace, outcome,
                                                **({"context_messages": context_messages} if context_messages else {}))
                 raise
@@ -231,6 +246,8 @@ class Runner:
                 if row is None:
                     raise
                 trace.finish("other")
-                outcome = ProviderOutcome("uncertain", "任务处理意外中断，费用预留已保留，请联系管理员核对", [])
+                outcome = trace.confirmed_outcome if isinstance(trace.confirmed_outcome, ProviderOutcome) else None
+                if outcome is None or outcome.status != "completed":
+                    outcome = ProviderOutcome("uncertain", "任务处理意外中断，费用预留已保留，请联系管理员核对", [])
                 await self._finish_job(row, snapshot, messages, execution_settings, trace, outcome,
                                        **({"context_messages": context_messages} if context_messages else {}))

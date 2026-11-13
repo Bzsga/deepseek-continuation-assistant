@@ -54,6 +54,8 @@ internal fun ArchiveScreen(
     onReorganize: () -> Unit = {},
     onOpenRecord: (String) -> Unit = {},
     onPoliticalExport: () -> Unit = {},
+    onRepair: () -> Unit = {},
+    onAddRecent: () -> Unit = {},
 ) {
     var editEntry by remember { mutableStateOf<ArchiveEntry?>(null) }
     var editBackground by remember { mutableStateOf(false) }
@@ -62,7 +64,6 @@ internal fun ArchiveScreen(
     var history by remember { mutableStateOf<List<Archive>?>(null) }
     var pendingRestore by remember { mutableStateOf<Archive?>(null) }
     var conflicts by remember { mutableStateOf<List<EntryConflict>?>(null) }
-    var chooseConversation by remember { mutableStateOf(false) }
     var showMoreActions by rememberSaveable(archive.id) { mutableStateOf(false) }
     val politicalState by controller.politicalExport.state.collectAsState()
     val continuingPoliticalTask = politicalState.task?.takeIf {
@@ -113,6 +114,7 @@ internal fun ArchiveScreen(
                 }
             }
             ActionRow {
+                TextButton(onClick = onRepair) { Text("没接上？调整一下") }
                 TextButton(onClick = { run { conflicts = controller.conflicts(archive.id) } }) {
                     Text("核对冲突")
                 }
@@ -146,9 +148,9 @@ internal fun ArchiveScreen(
                         (entries.any { it.text.isNotBlank() } || archive.background.isNotBlank())) {
                         OutlinedButton(onClick = onPoliticalExport, enabled = !state.busy) { Text("生成温和版") }
                     }
-                    TextButton(onClick = { chooseConversation = true }) {
+                    TextButton(onClick = onAddRecent) {
                         Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
-                        Text("关联对话")
+                        Text("补入最近聊天")
                     }
                     TextButton(onClick = { run { history = controller.revisions(archive.id) } }) {
                         Icon(Icons.Outlined.History, null, Modifier.size(17.dp))
@@ -409,25 +411,6 @@ internal fun ArchiveScreen(
             },
             onReload = { conflicts = controller.conflicts(archive.id) },
         )
-    }
-    if (chooseConversation) {
-        AppDialog(
-            "关联对话",
-            { chooseConversation = false },
-            actions = { TextButton(onClick = { chooseConversation = false }) { Text("关闭") } },
-        ) {
-            if (state.conversations.isEmpty()) Text("请先从首页导入聊天记录。")
-            state.conversations.forEach { conversation ->
-                TextButton(
-                    onClick = {
-                        chooseConversation = false
-                        onSelectConversation(conversation.id)
-                    }
-                ) {
-                    Text(conversation.title)
-                }
-            }
-        }
     }
 }
 

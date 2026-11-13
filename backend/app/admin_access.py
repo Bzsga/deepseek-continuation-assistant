@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .schemas import AdminConfigPatch
-from .store import SHANGHAI, local_day, reset_at
+from .store import PROVIDER_REQUEST_USAGE_SQL, SHANGHAI, local_day, reset_at
 
 
 SESSION_SECONDS = 12 * 60 * 60
@@ -118,12 +118,13 @@ def _statistics(store, days):
         for row in db.execute("SELECT day,COUNT(*) AS active_users FROM user_activity WHERE day BETWEEN ? AND ? GROUP BY day",
                               (start_date, end_date)):
             daily[row["day"]]["active_users"] = int(row["active_users"])
-        for row in db.execute("""SELECT count_day,COUNT(*) AS requests,
+        for row in db.execute(f"""WITH provider_request_usage AS ({PROVIDER_REQUEST_USAGE_SQL})
+                SELECT count_day,COUNT(*) AS requests,
                 SUM(CASE WHEN usage_known=1 THEN 1 ELSE 0 END) AS usage_known_requests,
                 SUM(CASE WHEN usage_known=1 THEN 0 ELSE 1 END) AS usage_unknown_requests,
                 COALESCE(SUM(CASE WHEN usage_known=1 THEN input_tokens ELSE 0 END),0) AS input_tokens,
                 COALESCE(SUM(CASE WHEN usage_known=1 THEN output_tokens ELSE 0 END),0) AS output_tokens
-                FROM jobs WHERE count_state='used' AND count_day BETWEEN ? AND ? GROUP BY count_day""",
+                FROM provider_request_usage WHERE count_day BETWEEN ? AND ? GROUP BY count_day""",
                 (start_date, end_date)):
             for field in ("requests", "usage_known_requests", "usage_unknown_requests", "input_tokens", "output_tokens"):
                 daily[row["count_day"]][field] = int(row[field])
@@ -151,22 +152,34 @@ def _users(store, limit, offset):
         db.execute("BEGIN")
         settings = store._settings(db)
         total = int(db.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-        rows = db.execute("""WITH page AS (
+        rows = db.execute(f"""WITH provider_request_usage AS ({PROVIDER_REQUEST_USAGE_SQL}), page AS (
                 SELECT id,access_mode,created_at,last_seen FROM users ORDER BY created_at DESC,id LIMIT ? OFFSET ?
+            ), request_totals AS (
+                SELECT owner_id,SUM(count_day=?) AS daily_used,COUNT(*) AS total_requests,
+                    SUM(usage_known=1) AS usage_known_requests,SUM(usage_known<>1) AS usage_unknown_requests,
+                    SUM(CASE WHEN usage_known=1 THEN input_tokens ELSE 0 END) AS input_tokens,
+                    SUM(CASE WHEN usage_known=1 THEN output_tokens ELSE 0 END) AS output_tokens
+                FROM provider_request_usage WHERE owner_id IN (SELECT id FROM page) GROUP BY owner_id
+            ), job_totals AS (
+                SELECT owner_id,SUM(count_state='reserved') AS daily_reserved,
+                    SUM(status='completed') AS completed,SUM(status='failed') AS failed,
+                    SUM(status='uncertain') AS uncertain,SUM(status='cancelled') AS cancelled
+                FROM jobs WHERE owner_id IN (SELECT id FROM page) GROUP BY owner_id
             ) SELECT page.id,page.access_mode,page.created_at,page.last_seen,
-                COALESCE(SUM(jobs.count_state='used' AND jobs.count_day=?),0) AS daily_used,
-                COALESCE(SUM(jobs.count_state='reserved'),0) AS daily_reserved,
-                COALESCE(SUM(jobs.count_state='used'),0) AS total_requests,
-                COALESCE(SUM(jobs.count_state='used' AND jobs.usage_known=1),0) AS usage_known_requests,
-                COALESCE(SUM(jobs.count_state='used' AND jobs.usage_known<>1),0) AS usage_unknown_requests,
-                COALESCE(SUM(jobs.status='completed'),0) AS completed,
-                COALESCE(SUM(jobs.status='failed'),0) AS failed,
-                COALESCE(SUM(jobs.status='uncertain'),0) AS uncertain,
-                COALESCE(SUM(jobs.status='cancelled'),0) AS cancelled,
-                COALESCE(SUM(CASE WHEN jobs.usage_known=1 THEN jobs.input_tokens ELSE 0 END),0) AS input_tokens,
-                COALESCE(SUM(CASE WHEN jobs.usage_known=1 THEN jobs.output_tokens ELSE 0 END),0) AS output_tokens
-            FROM page LEFT JOIN jobs ON jobs.owner_id=page.id
-            GROUP BY page.id,page.access_mode,page.created_at,page.last_seen ORDER BY page.created_at DESC,page.id""",
+                COALESCE(request_totals.daily_used,0) AS daily_used,
+                COALESCE(job_totals.daily_reserved,0) AS daily_reserved,
+                COALESCE(request_totals.total_requests,0) AS total_requests,
+                COALESCE(request_totals.usage_known_requests,0) AS usage_known_requests,
+                COALESCE(request_totals.usage_unknown_requests,0) AS usage_unknown_requests,
+                COALESCE(job_totals.completed,0) AS completed,
+                COALESCE(job_totals.failed,0) AS failed,
+                COALESCE(job_totals.uncertain,0) AS uncertain,
+                COALESCE(job_totals.cancelled,0) AS cancelled,
+                COALESCE(request_totals.input_tokens,0) AS input_tokens,
+                COALESCE(request_totals.output_tokens,0) AS output_tokens
+            FROM page LEFT JOIN request_totals ON request_totals.owner_id=page.id
+                LEFT JOIN job_totals ON job_totals.owner_id=page.id
+            ORDER BY page.created_at DESC,page.id""",
             (limit, offset, today)).fetchall()
         for row in rows:
             counts = {field: int(row[field]) for field in ("daily_used", "daily_reserved", "total_requests",

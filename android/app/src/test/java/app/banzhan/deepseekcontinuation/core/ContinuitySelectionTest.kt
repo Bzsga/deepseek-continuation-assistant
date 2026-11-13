@@ -14,7 +14,8 @@ class ContinuitySelectionTest {
         pinned: Boolean = false,
         selected: Boolean = false,
         length: Int = 100,
-    ) = ContinuityCandidate(id, order, branch, features.toSet(), pinned, selected, length)
+        focus: Int = 0,
+    ) = ContinuityCandidate(id, order, branch, features.toSet(), pinned, selected, length, focus)
 
     @Test fun recentRepetitionsLeaveRoomForEarlierDifferentInteractions() {
         val candidates = listOf(
@@ -93,5 +94,21 @@ class ContinuitySelectionTest {
         assertEquals(selected, chooseContinuityCandidates(candidates.reversed(), limit = 2))
         assertEquals(selected, chooseContinuityCandidates(candidates + candidates, limit = 2))
         assertFalse(selected.contains("a"))
+    }
+
+    @Test fun currentTopicGetsAPlaceAlongsideDifferentInteractionFeatures() {
+        val candidates = listOf(
+            candidate("topic", 1, "category:PROJECT", focus = 12),
+            candidate("topic-repeat", 2, "category:PROJECT", focus = 9),
+            candidate("correction", 3, "cue:CORRECTION"),
+            candidate("style", 4, "cue:RESPONSE_STYLE"),
+        )
+        assertEquals(listOf("topic", "correction", "style"), chooseContinuityCandidates(candidates))
+    }
+
+    @Test fun relevantAutomaticFragmentsCannotDisplaceExplicitOrPinnedChoices() {
+        val candidates = listOf(candidate("manual", 1, selected = true), candidate("pin", 2, pinned = true),
+            candidate("topic", 3, focus = 100))
+        assertEquals(listOf("manual", "pin"), chooseContinuityCandidates(candidates, limit = 2))
     }
 }

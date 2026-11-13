@@ -29,8 +29,10 @@ class LongTextTaskTest {
         assertEquals(SummaryProtocol.RESPONSE_STYLE_PROMPT_VERSION, organizationPromptVersion(companion, quota))
         assertEquals(SummaryProtocol.RESPONSE_STYLE_PROMPT_VERSION,
             organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 7)))
-        assertEquals(SummaryProtocol.PROMPT_VERSION,
+        assertEquals(SummaryProtocol.LONG_TEXT_PROMPT_VERSION,
             organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 8)))
+        assertEquals(SummaryProtocol.PROMPT_VERSION,
+            organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 9)))
         assertEquals(SummaryProtocol.PROMPT_VERSION, organizationPromptVersion(settings))
     }
 
@@ -103,7 +105,7 @@ class LongTextTaskTest {
     @Test fun backupFiveRetainsReferencesAndRejectsWrongScopeRoleOrText() {
         val chunks = listOf(TaskChunk("one", listOf(earlier), "one-key"),
             TaskChunk("two", listOf(current), "two-key", contextMessages = listOf(earlier)))
-        val backup = fixture(task(chunks))
+        val backup = fixture(task(chunks)).copy(version = 5)
         val restored = appJson.decodeFromString<BackupDocument>(appJson.encodeToString(backup))
         assertEquals(5, restored.version)
         BackupValidation.validate(restored)

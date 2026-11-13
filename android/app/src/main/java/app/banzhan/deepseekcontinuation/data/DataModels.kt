@@ -140,6 +140,9 @@ internal data class TaskRecord(
     // Missing in legacy JSON must never opt an already admitted task into a new prompt.
     val promptVersion: String = SummaryProtocol.LEGACY_PROMPT_VERSION,
     val reorganizationOfArchiveId: String? = null,
+    // Exact prior, already-selected source IDs used by this task's first chunk only.
+    // Missing fields on existing paid tasks never authorize additional references.
+    val initialContextScope: ArchiveSourceScope? = null,
 ) {
     fun display() = OrganizationTask(
         id, archiveId, label, status, chunks.count { it.completed }, chunks.size, message,
@@ -206,7 +209,7 @@ internal data class StoredConflict(val existing: ArchiveEntry, val proposed: Arc
 @Serializable
 internal data class BackupDocument(
     val format: String = "deepseek-continuation-assistant",
-    val version: Int = 5,
+    val version: Int = 6,
     val createdAt: Long = System.currentTimeMillis(),
     val settings: ServiceSettings,
     val sources: List<SourceRow>,

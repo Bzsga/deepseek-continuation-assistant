@@ -81,8 +81,8 @@ def test_ordinary_request_and_snapshot_remain_unchanged_by_operation_switch(sett
     default, reserve = snapshot_for(settings, messages)
     explicit, explicit_reserve = snapshot_for(settings, messages, operation="organize")
     assert default == explicit and reserve == explicit_reserve and "operation" not in default
-    assert default["protocol_version"] == 8
-    for version in range(2, 9):
+    assert default["protocol_version"] == 9
+    for version in range(2, 10):
         assert provider_messages(messages, protocol_version=version) == provider_messages(
             messages, protocol_version=version, operation="organize")
 

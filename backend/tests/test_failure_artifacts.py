@@ -69,13 +69,13 @@ def test_trace_diagnostics_only_include_supported_integer_prompt_versions():
     trace = artifacts.ProviderTrace(
         request={"content": PRIVATE}, response_body=bytearray(PRIVATE.encode("utf-8")),
     )
-    for version in (1, 2, 3, 4, 5, 6, 7, 8):
+    for version in (1, 2, 3, 4, 5, 6, 7, 8, 9):
         trace.prompt_version = version
         diagnostic = trace.diagnostics()
         assert diagnostic["prompt_version"] == version
         assert type(diagnostic["prompt_version"]) is int
         assert PRIVATE not in json.dumps(diagnostic)
-    for version in (None, True, 0, 9, 7.0, "7", PRIVATE):
+    for version in (None, True, 0, 10, 7.0, "7", PRIVATE):
         trace.prompt_version = version
         diagnostic = trace.diagnostics()
         assert "prompt_version" not in diagnostic

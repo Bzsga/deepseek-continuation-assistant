@@ -45,8 +45,11 @@ internal fun settingsWithServerBudget(settings: ServiceSettings, quota: Companio
 
 /** Older companion services keep their compatible request shape until the service is upgraded. */
 internal fun organizationPromptVersion(settings: ServiceSettings, quota: CompanionQuota? = null): String =
-    if (settings.mode == "byok" || (quota?.organizationProtocolVersion ?: 0) >= 8) SummaryProtocol.PROMPT_VERSION
-    else SummaryProtocol.RESPONSE_STYLE_PROMPT_VERSION
+    when {
+        settings.mode == "byok" || (quota?.organizationProtocolVersion ?: 0) >= 9 -> SummaryProtocol.PROMPT_VERSION
+        (quota?.organizationProtocolVersion ?: 0) >= 8 -> SummaryProtocol.LONG_TEXT_PROMPT_VERSION
+        else -> SummaryProtocol.RESPONSE_STYLE_PROMPT_VERSION
+    }
 
 internal fun developerSessionExpired(prefs: DeveloperPrefs): Boolean = runCatching {
     OffsetDateTime.parse(prefs.expiresAt).toInstant().toEpochMilli() <= System.currentTimeMillis()

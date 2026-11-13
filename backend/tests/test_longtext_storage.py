@@ -82,7 +82,7 @@ def test_reference_context_is_reserved_and_persisted_without_extra_count(setting
     with TestClient(app) as client:
         headers = session(client)
         before = client.get("/v1/quota", headers=headers).json()
-        assert before["organization_protocol_version"] == 8
+        assert before["organization_protocol_version"] == 9
         response = client.post("/v1/jobs", headers=headers, json=payload())
         assert response.status_code == 200
         job = response.json()
@@ -123,7 +123,7 @@ def test_queued_reference_job_recovers_exact_input_once_and_expires_together(set
     with TestClient(resumed) as client:
         result = wait_job(client, headers, job["id"])
         assert result["status"] == "completed"
-        assert calls == [(PRIMARY, CONTEXT, 8)]
+        assert calls == [(PRIMARY, CONTEXT, 9)]
         assert client.post("/v1/jobs", headers=headers, json=payload()).json()["id"] == job["id"]
         quota = client.get("/v1/quota", headers=headers).json()
         assert quota["daily_used"] == quota["user_daily_used"] == 1
@@ -166,7 +166,7 @@ def test_failed_reference_job_capture_replays_joint_sources_and_context_only_fil
         result = wait_job(client, headers, response.json()["id"])
         assert result["status"] == "failed"
         diagnostic = json.loads(result["message"].split(" diagnostic=", 1)[1])
-        assert diagnostic["prompt_version"] == 8 and diagnostic["failure_capture_state"] == "saved"
+        assert diagnostic["prompt_version"] == 9 and diagnostic["failure_capture_state"] == "saved"
         artifact = app.state.runner.artifacts.load(diagnostic["failure_capture_id"])
         assert artifact["messages"] == PRIMARY and artifact["context_messages"] == CONTEXT
         assert artifact["source_id_map"] == {"m1": "current", "m2": "previous"}

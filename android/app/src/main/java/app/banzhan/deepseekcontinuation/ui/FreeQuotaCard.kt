@@ -8,6 +8,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.banzhan.deepseekcontinuation.data.AppState
+import app.banzhan.deepseekcontinuation.data.automaticFallbackNotice
+import app.banzhan.deepseekcontinuation.data.fallbackAttemptLimit
 
 @Composable
 internal fun FreeQuotaCard(state: AppState, onRefresh: () -> Unit) {
@@ -40,6 +42,12 @@ internal fun FreeQuotaCard(state: AppState, onRefresh: () -> Unit) {
                 else -> {
                     QuotaLine("你今天还可用", quota.userDailyRemaining, quota.userDailyLimit)
                     QuotaLine("全站今天还可用", quota.dailyRemaining, quota.dailyLimit)
+                    if (quota.fallbackAttemptLimit > 1)
+                        Text(
+                            automaticFallbackNotice(quota.fallbackAttemptLimit),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     if (!quota.enabled)
                         Text(
                             "免费智能整理当前已暂停。",

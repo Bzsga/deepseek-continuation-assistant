@@ -138,6 +138,7 @@ object ContinuityLogic {
                 (turn.fragment.id in explicitlySelected || turn.fragment.messages.any { message -> message.id in anchorIds || message.id in cueSources })
         }
         val cueFeatures = cues.groupBy { it.source.conversation.id to it.source.branch.id }
+        val focus = ContinuityFocus.forArchive(archive, conversations)
         val candidates = allRecommended.map { turn ->
             val fragment = turn.fragment
             val ids = fragment.messages.map { it.id }.toSet()
@@ -151,7 +152,8 @@ object ContinuityLogic {
             ContinuityCandidate(fragment.id, turnOrder.getValue(fragment.id),
                 "${fragment.conversationId.length}:${fragment.conversationId}${fragment.branchId}", features,
                 pinned = ids.any { it in pinnedIds }, explicitlySelected = fragment.id in explicitlySelected,
-                characterCount = fragment.messages.sumOf { it.content.length.toLong() }.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                characterCount = fragment.messages.sumOf { it.content.length.toLong() }.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                focusScore = focus.score(fragment.messages.joinToString("\n") { it.content.take(4000) }))
         }
         val recommendedKeys = chooseContinuityCandidates(candidates, limit = 8).toSet()
         val recommended = allRecommended.filter { it.fragment.id in recommendedKeys }
@@ -190,7 +192,9 @@ object ContinuityLogic {
             }
             val openThreads = cues.filter { it.entry.continuityCue == ContinuityCue.OPEN_THREAD }
             if (openThreads.isNotEmpty()) {
-                append("\n\n【未完话题】\n以下是来源当时的状态；结合后文答复和修正，不把早期待定事项自动当成现在仍未解决，也不把建议当作结论。\n")
+                append("\n\n【讨论进展与未完话题】\n以下按各自来源保留当时讨论到哪一步、相关理由与仍待确认之处；")
+                append("结合后文答复和明确修正理解，不把早期待定事项自动当成现在仍未解决，也不把建议当作结论。")
+                append("已讨论过的解释或方案，继续时保留其适用条件和被否定的理由，避免无新依据地从头重复。\n")
                 append(renderCueEntries(openThreads))
             }
         }
@@ -388,7 +392,7 @@ object ContinuityLogic {
                     ContinuityCue.PREFERENCE -> "交流偏好"
                     ContinuityCue.CORRECTION -> "明确修正"
                     ContinuityCue.SHARED_LANGUAGE -> "共同说法"
-                    ContinuityCue.OPEN_THREAD -> "未完话题"
+                    ContinuityCue.OPEN_THREAD -> "讨论进展 / 未完话题"
                     ContinuityCue.RESPONSE_STYLE -> "回应方式观察（非用户要求）"
                     null -> error("自动交流线索缺少类型。")
                 }

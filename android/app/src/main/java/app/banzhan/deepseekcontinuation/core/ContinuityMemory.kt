@@ -13,7 +13,11 @@ object ContinuityMemory {
         val valid = archive.entries.withIndex().filter { !it.value.deleted && it.value.text.isNotBlank() }
         if (archive.generationMode != "summary") return render(archive, valid.map { it.value })
 
-        val protected = valid.filter { it.value.edited || it.value.pinned || it.value.sourceIds.isEmpty() }
+        val protected = valid.filter {
+            it.value.edited || it.value.pinned || it.value.sourceIds.isEmpty() ||
+                (it.value.kind == EntryKind.USER_FACT && it.value.continuityCue in
+                    setOf(ContinuityCue.PREFERENCE, ContinuityCue.CORRECTION))
+        }
         val selected = protected.mapTo(mutableSetOf()) { it.index }
         val automatic = valid.filter { it.index !in selected }
         val baseline = render(archive, protected.map { it.value })
@@ -22,15 +26,19 @@ object ContinuityMemory {
         }
 
         val recency = sourceRecency(archive, conversations, automatic)
-        val byImportance = compareBy<IndexedValue<ArchiveEntry>> { kindPriority(it.value.kind) }
+        val focus = ContinuityFocus.forArchive(archive, conversations)
+        val relevance = automatic.associate { it.index to focus.score(it.value.text) }
+        val byImportance = compareByDescending<IndexedValue<ArchiveEntry>> { relevance.getValue(it.index) }
             .thenByDescending { recency[it.index] ?: -1.0 }
             .thenBy { it.index }
         // Give each category a turn within a kind before taking more from a crowded category.
         val categoryRounds = automatic.groupBy { it.value.kind to it.value.category }.values
             .flatMap { group -> group.sortedWith(byImportance).mapIndexed { round, entry -> entry.index to round } }
             .toMap()
-        val priority = automatic.sortedWith(compareBy<IndexedValue<ArchiveEntry>> { kindPriority(it.value.kind) }
+        val priority = automatic.sortedWith(compareByDescending<IndexedValue<ArchiveEntry>> { relevance.getValue(it.index) > 0 }
+            .thenBy { kindPriority(it.value.kind) }
             .thenBy { categoryRounds.getValue(it.index) }
+            .thenByDescending { relevance.getValue(it.index) }
             .thenByDescending { recency[it.index] ?: -1.0 }
             .thenBy { it.index })
 

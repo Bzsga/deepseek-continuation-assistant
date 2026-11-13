@@ -20,6 +20,8 @@ import app.banzhan.deepseekcontinuation.core.ContinuitySettings
 import app.banzhan.deepseekcontinuation.core.DeepSeekImporter
 import app.banzhan.deepseekcontinuation.core.EntryConflict
 import app.banzhan.deepseekcontinuation.core.ImportedConversation
+import app.banzhan.deepseekcontinuation.core.IncrementalContinuity
+import app.banzhan.deepseekcontinuation.core.IncrementalSelection
 import app.banzhan.deepseekcontinuation.core.ReorganizationLogic
 import java.security.MessageDigest
 import java.io.File
@@ -699,22 +701,42 @@ class AppController internal constructor(application: Application, databaseName:
         }
     }
 
-    suspend fun addConversation(archiveId: String, conversation: ImportedConversation, branchId: String, selectedIds: Set<String>) = operation {
+    suspend fun incrementalSelection(
+        archiveId: String, conversationId: String, branchId: String, selectedIds: Set<String>,
+    ): IncrementalSelection = operation {
+        mutex.withLock {
+            val archive = loadArchive(archiveId)
+            val source = storedConversation(conversationId)
+            incrementalSelectionFor(archive, source, branchId, selectedIds, dao.tasks().map { it.decodeTask() })
+        }
+    }
+
+    suspend fun addConversation(
+        archiveId: String, conversation: ImportedConversation, branchId: String, selectedIds: Set<String>,
+        includeRawEntries: Boolean = true,
+    ): IncrementalSelection = operation {
         mutex.withLock {
             requireWritable()
-            database.withTransaction {
+            val addition = database.withTransaction {
                 val archive = loadArchive(archiveId)
                 val source = storedConversation(conversation.id)
-                val messages = selectMessages(source, branchId, selectedIds)
-                require(messages.isNotEmpty()) { "请选择要加入的消息" }
-                val merged = ArchiveLogic.merge(archive.entries, ArchiveLogic.localEntries(messages))
+                require(selectedIds.isNotEmpty()) { "请选择要加入的消息" }
+                val addition = incrementalSelectionFor(archive, source, branchId, selectedIds,
+                    dao.tasks().map { it.decodeTask() })
+                if (addition.messageIds.isEmpty()) return@withTransaction addition
+                val messages = selectMessages(source, branchId, addition.messageIds.toSet())
+                require(messages.isNotEmpty()) { "请选择要加入的文字消息" }
+                val merged = if (includeRawEntries) ArchiveLogic.merge(archive.entries, ArchiveLogic.localEntries(messages))
+                    else app.banzhan.deepseekcontinuation.core.MergeResult(archive.entries, emptyList())
                 val scoped = withSelectedSourceScope(archive, source, branchId, selectedIds)
                 saveArchive(scoped.copy(conversationIds = (archive.conversationIds + source.id).distinct(), entries = merged.entries,
-                    generationMode = if (archive.generationMode == "summary") "legacy" else archive.generationMode))
+                    generationMode = if (includeRawEntries && archive.generationMode == "summary") "legacy" else archive.generationMode))
                 saveConflicts(archiveId, merged.conflicts)
+                addition
             }
             refresh()
-            notice("已加入所选对话，保留人工修改和置顶内容")
+            notice(addition.notice)
+            addition
         }
     }
 
@@ -958,6 +980,25 @@ class AppController internal constructor(application: Application, databaseName:
     }
 
     suspend fun organize(archiveId: String, conversationId: String, branchId: String, selectedIds: Set<String>) = operation {
+        // Resolve local coverage before quota/credential work. An already completed selection
+        // must remain usable even when the service is unavailable or the daily quota is empty.
+        val requestedMessages = mutex.withLock {
+            requireWritable()
+            require(archiveId !in deletingArchives) { "档案正在删除" }
+            val archive = loadArchive(archiveId)
+            require(conversationId in archive.conversationIds) { "请先把该会话加入档案" }
+            val tasks = dao.tasks().map { it.decodeTask() }
+            requireTaskSlot(archiveId, null, tasks)
+            require(tasks.none { it.archiveId == archiveId && jobs[it.id]?.isCompleted == false }) { "旧任务正在停止，请稍后重试" }
+            val source = storedConversation(conversationId)
+            require(selectMessages(source, branchId, selectedIds).isNotEmpty()) { "请选择要整理的消息" }
+            val addition = incrementalSelectionFor(archive, source, branchId, selectedIds, tasks, includeLocalCoverage = false)
+            if (addition.messageIds.isEmpty()) {
+                notice("所选内容无需重复整理，已保留现有档案和人工修订。")
+                return@operation
+            }
+            selectMessages(source, branchId, addition.messageIds.toSet())
+        }
         val previewQuota = state.value.quota
         val settingsSnapshot = if (state.value.settings.mode == "companion") ensureCompanionIdentity() else state.value.settings
         val freeQuota = if (settingsSnapshot.mode == "companion") refreshQuotaState() else null
@@ -970,7 +1011,9 @@ class AppController internal constructor(application: Application, databaseName:
             requireTaskSlot(archiveId, null, tasks)
             require(tasks.none { it.archiveId == archiveId && jobs[it.id]?.isCompleted == false }) { "旧任务正在停止，请稍后重试" }
             val source = storedConversation(conversationId)
-            val messages = selectMessages(source, branchId, selectedIds)
+            val addition = incrementalSelectionFor(archive, source, branchId, selectedIds, tasks, includeLocalCoverage = false)
+            val messages = selectMessages(source, branchId, addition.messageIds.toSet())
+            require(messages == requestedMessages) { "档案或原文已变化，请重新查看新增范围后再开始。" }
             require(messages.isNotEmpty()) { "请选择要整理的消息" }
             require(state.value.settings == settingsSnapshot) { "服务设置已改变，请重新检查后开始。" }
             if (freeQuota != null) require(freeQuota.organizationBlocker() == null) { freeQuota.organizationBlocker().orEmpty() }
@@ -984,7 +1027,16 @@ class AppController internal constructor(application: Application, databaseName:
             val settings = validateOrganizationConfiguration(if (freeQuota != null) settingsWithServerBudget(settingsSnapshot, freeQuota, promptVersion) else settingsSnapshot,
                 promptVersion)
             val secret = if (settings.mode == "byok") settings.apiKey else settings.trialToken
-            val chunks = budgetedChunks(messages, settings, promptVersion)
+            val standardChunks = budgetedChunks(messages, settings, promptVersion)
+            val initialContext = if (SummaryProtocol.supportsContext(promptVersion)) boundedLeadingContext(
+                IncrementalContinuity.priorSelectedMessages(archive, state.value.conversations, source, branchId,
+                    messages.map { it.id }.toSet()), 800) else emptyList()
+            // References may improve a new incremental task, but must not silently add
+            // requests beyond the estimate the user already confirmed for its primary text.
+            val contextualChunks = if (initialContext.isEmpty()) null else try {
+                budgetedChunks(messages, settings, promptVersion, initialContext)
+            } catch (_: IllegalArgumentException) { null }
+            val chunks = contextualChunks?.takeIf { it.size <= standardChunks.size } ?: standardChunks
             require(chunks.isNotEmpty()) { "没有可整理的文字消息" }
             val id = UUID.randomUUID().toString()
             credentials.put("task:$id", secret)
@@ -992,8 +1044,12 @@ class AppController internal constructor(application: Application, databaseName:
                 val key = organizationCacheKey(settings, promptVersion, chunk.id, chunk.messages, contextMessages = chunk.contextMessages)
                 TaskChunk(chunk.id, chunk.messages, key, contextMessages = chunk.contextMessages)
             }
+            val actualInitialIds = records.firstOrNull()?.contextMessages.orEmpty().map { it.id }.toSet()
+            val initialScope = if (actualInitialIds.isEmpty()) null
+                else ContinuityLogic.captureScope(source, branchId, actualInitialIds)
             val task = TaskRecord(id, archiveId, archive.title, settings.withoutSecrets(), "task:$id", records,
-                message = estimateCost(settings, records, promptVersion), promptVersion = promptVersion)
+                message = estimateCost(settings, records, promptVersion), promptVersion = promptVersion,
+                initialContextScope = initialScope)
             DiagnosticLog.record("task", "prepare", mapOf("chunk_count" to records.size.toLong()))
             database.withTransaction {
                 val scoped = withSelectedSourceScope(archive, source, branchId, selectedIds)
@@ -1384,7 +1440,7 @@ class AppController internal constructor(application: Application, databaseName:
             if (!chunk.requestStarted) {
                 val quota = organizationNetwork.quota(settings)
                 quota.organizationBlocker()?.let { throw SummaryFailure(it, ambiguous = false) }
-                if (task.promptVersion == SummaryProtocol.PROMPT_VERSION && (quota.organizationProtocolVersion ?: 0) < 8) {
+                if ((quota.organizationProtocolVersion ?: 0) < SummaryProtocol.requiredCompanionProtocol(task.promptVersion)) {
                     throw SummaryFailure("免费服务暂不支持本次长文整理，已保留进度。请待服务更新后继续。", ambiguous = false)
                 }
                 val currentBudget = settingsWithServerBudget(settings, quota, task.promptVersion)
@@ -1482,6 +1538,14 @@ class AppController internal constructor(application: Application, databaseName:
         require(branch.messages.map { it.id }.toSet().containsAll(selectedIds)) { "选择中包含其他分支消息，请重新选择" }
         return branch.messages.filter { it.id in selectedIds && it.content.isNotBlank() }
     }
+
+    private fun incrementalSelectionFor(
+        archive: Archive, source: ImportedConversation, branchId: String, selectedIds: Set<String>,
+        tasks: List<TaskRecord>, includeLocalCoverage: Boolean = true,
+    ): IncrementalSelection = IncrementalContinuity.select(archive, state.value.conversations, source, branchId, selectedIds,
+        completedPrimaryBatches = tasks.filter { it.archiveId == archive.id }.map { task ->
+            task.chunks.filter { it.completed }.flatMap { it.messages }
+        }.filter { it.isNotEmpty() }, includeLocalCoverage = includeLocalCoverage)
 
     private fun withSelectedSourceScope(
         archive: Archive, conversation: ImportedConversation, branchId: String, selectedIds: Set<String>,
@@ -1638,9 +1702,9 @@ internal fun budgetedChunks(messages: List<ChatMessage>, settings: ServiceSettin
     // 64k context previously produced 14k-character chunks with only 4k output.
     // Keep each request bounded by its output budget as well as input capacity.
     var limit = minOf(SummaryProtocol.chunkCharacters(settings, promptVersion), (settings.maxOutputTokens * 2).coerceAtMost(6000))
-    require(initialContext.isEmpty() || promptVersion == SummaryProtocol.PROMPT_VERSION) { "旧整理协议不支持跨段参考" }
+    require(initialContext.isEmpty() || SummaryProtocol.supportsContext(promptVersion)) { "旧整理协议不支持跨段参考" }
     while (true) {
-        val chunks = if (promptVersion == SummaryProtocol.PROMPT_VERSION) {
+        val chunks = if (SummaryProtocol.supportsContext(promptVersion)) {
             ArchiveLogic.dialogueChunks(messages, limit).mapIndexed { index, chunk ->
                 if (index != 0 || initialContext.isEmpty()) chunk else {
                     val references = boundedLeadingContext(initialContext, minOf(800, limit / 6))

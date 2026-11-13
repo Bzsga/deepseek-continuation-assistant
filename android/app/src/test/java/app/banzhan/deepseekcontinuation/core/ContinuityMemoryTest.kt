@@ -160,6 +160,44 @@ class ContinuityMemoryTest {
         assertEquals(0, noGuidance.omittedCount)
     }
 
+    @Test fun currentTopicCanRetainAnOlderRelevantMemoryAheadOfNewerUnrelatedFacts() {
+        val database = entry("database", "数据库连接池上限为二十。")
+        val holiday = entry("holiday", "周末准备去海边散步。")
+        val messages = listOf(ChatMessage("database", "user", "早期说明甲"),
+            ChatMessage("holiday", "user", "早期说明乙"))
+        val archive = archive(listOf(database, holiday)).copy(sourceScopes = listOf(scope(messages)),
+            continuity = ContinuitySettings(enabled = true, nextMessage = "数据库连接池为什么超时"))
+        val expected = full(archive.copy(entries = listOf(database)))
+        val result = ContinuityMemory.continuationMemory(archive, listOf(conversation(messages)), expected.text.length)
+        assertEquals(expected.text, result.text)
+        assertEquals(1, result.omittedCount)
+        assertEquals(listOf(database, holiday), archive.entries)
+    }
+
+    @Test fun topicMatchingStillCoversDifferentMemoryCategories() {
+        val database = entry("database", "数据库备份每周进行。")
+        val duplicateTopic = entry("backup", "数据库备份采用压缩。")
+        val owner = entry("owner", "数据库由小林维护。几项职责都已说明。")
+            .copy(category = EntryCategory.PEOPLE)
+        val archive = archive(listOf(database, duplicateTopic, owner)).copy(
+            continuity = ContinuitySettings(enabled = true, nextMessage = "数据库备份"))
+        val expected = full(archive.copy(entries = listOf(database, owner)))
+        val result = ContinuityMemory.continuationMemory(archive, emptyList(), expected.text.length)
+        assertEquals(expected.text, result.text)
+    }
+
+    @Test fun noTopicMatchPreservesTheExistingPriorityAndExplicitRequirementsStayWhole() {
+        val entries = listOf(entry("a", "周末去海边散步。"), entry("b", "今天在家做饭。"))
+        val base = archive(entries)
+        val budget = full(base.copy(entries = entries.take(1))).text.length
+        assertEquals(export(base, budget), export(base.copy(continuity = ContinuitySettings(enabled = true,
+            nextMessage = "PostgreSQL")), budget))
+        val preference = entry("preference", "讨论时先听我说完，不急着给建议。")
+            .copy(continuityCue = ContinuityCue.PREFERENCE)
+        assertEquals(full(base.copy(entries = listOf(preference))).text,
+            export(base.copy(entries = entries + preference), 0).text)
+    }
+
     private fun entry(id: String, text: String) = ArchiveEntry(
         id, EntryCategory.BACKGROUND, text, listOf(id), EntryKind.USER_FACT,
     )

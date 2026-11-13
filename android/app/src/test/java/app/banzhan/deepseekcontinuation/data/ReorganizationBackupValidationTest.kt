@@ -68,12 +68,12 @@ class ReorganizationBackupValidationTest {
         assertEquals("continuation-v1.2", restored.tasks.single().decodeTask().promptVersion)
     }
 
-    @Test fun newBackupWritesVersionFiveAndLegacyVersionsOneThroughThreeStillReadWithDefaults() {
+    @Test fun newBackupWritesVersionSixAndLegacyVersionsOneThroughThreeStillReadWithDefaults() {
         val encoded = appJson.encodeToString(fixture())
         val wireVersion = appJson.parseToJsonElement(encoded).jsonObject.getValue("version").jsonPrimitive.int
-        assertEquals(5, wireVersion)
+        assertEquals(6, wireVersion)
         // This is the former reader's version gate, not a claim that its binary was executed.
-        assertFalse("The v1..4 reader must reject reference-aware tasks before interpreting them", wireVersion in 1..4)
+        assertFalse("The v1..5 reader must reject scoped initial references before interpreting them", wireVersion in 1..5)
 
         val oldArchiveFields = appJson.parseToJsonElement(appJson.encodeToString(archive.copy(
             continuity = archive.continuity.copy(includeResponseStyle = false)))).jsonObject

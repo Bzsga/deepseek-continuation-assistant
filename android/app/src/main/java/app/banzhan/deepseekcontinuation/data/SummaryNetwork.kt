@@ -64,6 +64,8 @@ data class CompanionQuota(
     val userDailyReserved: Int? = null,
     val organizationProtocolVersion: Int? = null,
     val politicalFilterSupported: Boolean = false,
+    val automaticFallbackEnabled: Boolean = false,
+    val maxAttemptsPerChunk: Int = 1,
 ) {
     fun organizationBlocker(): String? {
         if (!enabled) return "免费智能整理暂未开放，可以先带走原文，或使用自己的 AI 服务。"
@@ -287,12 +289,16 @@ object SummaryNetwork {
         // unusable; only an explicit boolean true enables the extra operation.
         val politicalFilterSupported = (root["political_filter_supported"] as? JsonPrimitive)
             ?.takeUnless { it.isString }?.booleanOrNull ?: false
+        val automaticFallbackEnabled = (root["automatic_fallback_enabled"] as? JsonPrimitive)
+            ?.takeUnless { it.isString }?.booleanOrNull ?: false
+        val maxAttemptsPerChunk = (root["max_attempts_per_chunk"] as? JsonPrimitive)
+            ?.takeUnless { it.isString }?.intOrNull?.takeIf { it in 1..3 } ?: 1
         return CompanionQuota(enabled, amount("remaining_cny"), amount("per_job_limit_cny"),
             displayText("model", 160), displayText("message", 500),
             counter("daily_limit"), counter("daily_used"), counter("daily_remaining"),
             counter("user_daily_limit"), counter("user_daily_used"), counter("user_daily_remaining"), resetAt, accessMode,
             contextTokens, maxOutputTokens, counter("daily_reserved"), counter("user_daily_reserved"), organizationProtocolVersion,
-            politicalFilterSupported)
+            politicalFilterSupported, automaticFallbackEnabled, maxAttemptsPerChunk)
     }
 
     internal fun submissionPayload(messages: List<ChatMessage>, idempotencyKey: String,

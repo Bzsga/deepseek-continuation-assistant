@@ -17,8 +17,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // Explicit local bridge build for exercising an upgrade; regular releases use these defaults.
-        versionCode = providers.gradleProperty("updateTestVersionCode").orNull?.toInt() ?: 19
-        versionName = providers.gradleProperty("updateTestVersionName").orNull ?: "1.0.10"
+        versionCode = providers.gradleProperty("updateTestVersionCode").orNull?.toInt() ?: 20
+        versionName = providers.gradleProperty("updateTestVersionName").orNull ?: "1.0.11"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }

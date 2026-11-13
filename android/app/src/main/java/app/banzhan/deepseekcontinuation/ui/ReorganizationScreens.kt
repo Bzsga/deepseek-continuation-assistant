@@ -129,7 +129,7 @@ internal fun ReorganizationDialog(
         plan.estimate?.let { estimate ->
             Text("点击确认会将上述消息发送给此服务。")
             if (companion) {
-                Text("预计使用 ${estimate.chunks} 次免费模型请求。", style = MaterialTheme.typography.bodyMedium)
+                Text("预计使用 ${state.quota.requestCountText(estimate.chunks)} 次免费模型请求。", style = MaterialTheme.typography.bodyMedium)
             } else if (estimate.estimatedCost != null) {
                 Text("按填写单价估算约 ${"%.4f".format(estimate.estimatedCost)}（与单价同币种），实际费用以服务商账单为准。")
             } else {
