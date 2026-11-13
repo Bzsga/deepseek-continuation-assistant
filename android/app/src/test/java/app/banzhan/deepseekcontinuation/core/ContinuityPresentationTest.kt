@@ -20,7 +20,7 @@ class ContinuityPresentationTest {
         assertEquals(2, original.entries.size)
         val plan = ContinuityLogic.buildPlan(original, listOf(conversation))
         assertEquals(1, Regex(Regex.escape(original.entries.first().text)).findAll(plan.export.text).count())
-        assertTrue(plan.export.text.contains("第1、2条"))
+        assertFalse(plan.export.text.contains("原话第"))
         assertTrue(plan.notices.any { it.contains("已合并 1 条") })
     }
 
@@ -72,7 +72,7 @@ class ContinuityPresentationTest {
         assertTrue(full.export.text.indexOf(open.text) < full.export.text.indexOf(detail.text))
         assertEquals(0, full.export.omittedCount)
         for (result in listOf(plan, full)) {
-            assertTrue(result.export.text.contains("当时的进展、相关理由和待定之处"))
+            assertTrue(result.export.text.contains("【上次聊到这里】"))
         }
         assertEquals(listOf(detail, open), source.entries)
     }

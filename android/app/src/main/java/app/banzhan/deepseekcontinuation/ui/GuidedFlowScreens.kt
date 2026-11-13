@@ -653,7 +653,7 @@ internal fun ContinuationResultScreen(
         export = prepared.first
     }
     var previewLimit by rememberSaveable(archive.id) { mutableIntStateOf(8000) }
-    var showPreview by rememberSaveable(archive.id) { mutableStateOf(false) }
+    var showPreview by rememberSaveable(archive.id) { mutableStateOf(true) }
     var showMoreActions by rememberSaveable(archive.id) { mutableStateOf(false) }
     val text = export?.getOrNull()?.text
     val unfinished = task != null && task.status != "completed"
@@ -760,10 +760,10 @@ internal fun ContinuationResultScreen(
                     ContinuitySetupCard(archive, conversations, onSaveContinuity)
                     ActionRow {
                         if (!large) OutlinedButton(onClick = { onSave(text) }) { Text("保存续聊文件") }
-                        if (archive.generationMode == "summary") {
-                            OutlinedButton(onClick = onPoliticalExport, enabled = !busy) { Text("生成温和版") }
-                        }
                         TextButton(onClick = onDetails) { Text("查看与修改详细内容") }
+                    }
+                    if (archive.generationMode == "summary") {
+                        SensitiveContentAction(onPoliticalExport, enabled = !busy)
                     }
                     if (!hasReorganizationNavigation && pendingOrganization == null) {
                         ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)

@@ -123,6 +123,17 @@ class ContinuityMemoryTest {
         assertEquals(full(sameKindProtected), export(sameKindProtected, full(sameKindProtected).text.length))
     }
 
+    @Test fun attributedAndTerseAdviceUseTheirActualLeadsAtTheExactBudget() {
+        val first = entry("first", "也许可以先留一点时间。").copy(kind = EntryKind.ASSISTANT_SUGGESTION)
+        val saved = entry("saved", "你当时说，不必急着想明白。")
+            .copy(kind = EntryKind.ASSISTANT_SUGGESTION, pinned = true)
+        val last = entry("last", "另一种可能是先放一放。").copy(kind = EntryKind.ASSISTANT_SUGGESTION)
+        val archive = archive(listOf(first, saved, last))
+        val expected = full(archive)
+        assertEquals(expected, export(archive, expected.text.length))
+        assertEquals(listOf(first, saved, last), archive.entries)
+    }
+
     @Test fun mixedKindsAndCategoriesStayWithinBudgetWithStableWholeEntries() {
         val entries = (0 until 45).map { index ->
             entry("item-$index", "条目$index：原样保留😀123.45。".repeat(index % 3 + 1)).copy(

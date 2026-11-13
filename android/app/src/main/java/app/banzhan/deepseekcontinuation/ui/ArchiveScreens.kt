@@ -115,16 +115,15 @@ internal fun ArchiveScreen(
             }
             ActionRow {
                 TextButton(onClick = onRepair) { Text("没接上？调整一下") }
-                continuingPoliticalTask?.let { pending ->
-                    TextButton(onClick = onPoliticalExport, enabled = !state.busy) {
-                        Text(if (pending.canResume) "继续温和版检查" else "查看温和版进度")
-                    }
-                }
                 TextButton(onClick = { showMoreActions = !showMoreActions }) {
                     Icon(if (showMoreActions) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
                         null, Modifier.size(18.dp))
                     Text(if (showMoreActions) "收起更多操作" else "更多操作")
                 }
+            }
+            continuingPoliticalTask?.let { pending ->
+                SensitiveContentAction(onPoliticalExport, enabled = !state.busy,
+                    label = if (pending.canResume) "去除敏感内容 · 继续检查" else "去除敏感内容 · 查看进度")
             }
             pendingOrganization?.let { pending ->
                 TextButton(onClick = { onOpenRecord(archive.id) }, enabled = !state.busy) {
@@ -147,10 +146,6 @@ internal fun ArchiveScreen(
                     if (archive.background.isBlank()) {
                         TextButton(onClick = { editBackground = true }) { Text("补充背景") }
                     }
-                    if (continuingPoliticalTask == null && archive.generationMode == "summary" &&
-                        (entries.any { it.text.isNotBlank() } || archive.background.isNotBlank())) {
-                        OutlinedButton(onClick = onPoliticalExport, enabled = !state.busy) { Text("生成温和版") }
-                    }
                     TextButton(onClick = onAddRecent) {
                         Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
                         Text("补入最近聊天")
@@ -160,6 +155,10 @@ internal fun ArchiveScreen(
                         Spacer(Modifier.width(5.dp))
                         Text("历史版本")
                     }
+                }
+                if (continuingPoliticalTask == null && archive.generationMode == "summary" &&
+                    (entries.any { it.text.isNotBlank() } || archive.background.isNotBlank())) {
+                    SensitiveContentAction(onPoliticalExport, enabled = !state.busy)
                 }
                 if (!hasReorganizationNavigation && pendingOrganization == null) {
                     ArchiveReorganizationActions(

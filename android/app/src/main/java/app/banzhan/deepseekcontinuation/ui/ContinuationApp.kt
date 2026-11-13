@@ -388,7 +388,7 @@ fun ContinuationApp(
     fun installationBlocker(): String? {
         val current = controller.state.value
         return when {
-            controller.politicalExport.state.value.task?.status in setOf("queued", "running") -> "温和版检查正在进行，请完成后再安装更新。"
+            controller.politicalExport.state.value.task?.status in setOf("queued", "running") -> "敏感内容检查正在进行，请完成后再安装更新。"
             current.tasks.any { it.status in setOf("queued", "running") } -> "整理正在进行，请完成后再安装更新。"
             currentIncomingImport != null -> "请先处理收到的聊天文件，再安装更新。"
             current.busy || submitting || reorganizationLoading -> "当前操作完成后可安装更新。"
@@ -995,15 +995,15 @@ fun ContinuationApp(
                 controller = controller,
                 onDismiss = { politicalArchiveId = null },
                 onCopy = { text -> run {
-                    require(text.toByteArray(Charsets.UTF_8).size <= 60 * 1024) { "内容较长，请保存为温和版文件。" }
+                    require(text.toByteArray(Charsets.UTF_8).size <= 60 * 1024) { "内容较长，请保存去除敏感内容后的文件。" }
                     (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                        .setPrimaryClip(ClipData.newPlainText("续聊温和版", text))
-                    snackbars.showSnackbar("温和版已复制，原档案未改动。")
+                        .setPrimaryClip(ClipData.newPlainText("去除敏感内容", text))
+                    snackbars.showSnackbar("已复制去除敏感内容后的文本，原档案未改动。")
                 } },
                 onSave = { text -> run {
                     val checkedArchive = state.archives.firstOrNull { it.id == politicalState.task?.archiveId }
-                    stageDocument(text, "温和版已保存，原档案未改动。")
-                    saveContinuation.launch(safeFileName(checkedArchive?.title ?: archive.title) + "-温和版.txt")
+                    stageDocument(text, "已保存去除敏感内容后的文本，原档案未改动。")
+                    saveContinuation.launch(safeFileName(checkedArchive?.title ?: archive.title) + "-去除敏感内容.txt")
                 } },
             ) else LaunchedEffect(id) { politicalArchiveId = null }
         }

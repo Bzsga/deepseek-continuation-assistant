@@ -12,9 +12,9 @@ def synthetic_messages():
 def test_source_first_version_preserves_the_quoted_input_and_previous_schema():
     sources = synthetic_messages()
     old = provider_messages(sources, protocol_version=9)
-    current = provider_messages(sources)
+    current = provider_messages(sources, protocol_version=10)
     old_body, current_body = (json.loads(prompt[1]["content"]) for prompt in (old, current))
-    assert CURRENT_PROTOCOL_VERSION == 10
+    assert CURRENT_PROTOCOL_VERSION >= 10
     assert current == provider_messages(sources, protocol_version=10)
     assert len(current) == 2
     assert current[0] == old[0]

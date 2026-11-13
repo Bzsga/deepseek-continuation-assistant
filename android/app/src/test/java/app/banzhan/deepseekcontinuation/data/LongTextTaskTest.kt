@@ -33,8 +33,12 @@ class LongTextTaskTest {
             organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 8)))
         assertEquals(SummaryProtocol.DISCUSSION_PROGRESS_PROMPT_VERSION,
             organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 9)))
-        assertEquals(SummaryProtocol.PROMPT_VERSION,
+        assertEquals(SummaryProtocol.SOURCE_FAITHFUL_PROMPT_VERSION,
             organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 10)))
+        assertEquals(SummaryProtocol.NATURAL_RECALL_PROMPT_VERSION,
+            organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 11)))
+        assertEquals(SummaryProtocol.PROMPT_VERSION,
+            organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 12)))
         assertEquals(SummaryProtocol.PROMPT_VERSION, organizationPromptVersion(settings))
     }
 

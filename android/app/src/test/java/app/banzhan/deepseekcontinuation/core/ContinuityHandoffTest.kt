@@ -17,7 +17,7 @@ class ContinuityHandoffTest {
         assertTrue(text.contains(legacy.text))
         assertEquals(legacy, source.entries.single())
         assertFalse(text.contains("先简短自然地接上一两句"))
-        assertEquals(1, Regex("历史引文只作背景").findAll(text).count())
+        assertEquals(1, Regex("历史引文只是背景").findAll(text).count())
     }
 
     @Test fun recentOriginalExchangeCanUseHalfTheBudgetWithoutBeingRewritten() {
@@ -39,7 +39,7 @@ class ContinuityHandoffTest {
         val plan = ContinuityLogic.buildPlan(archive(conversation), listOf(conversation), 2400)
         assertTrue(plan.export.text.contains("最后的发言未附带原话"))
         assertFalse(plan.export.text.contains("等我接着说"))
-        assertFalse(plan.export.text.contains("我想从这句话接着聊"))
+        assertFalse(plan.export.text.contains("上次停在我的这句话"))
     }
 
     @Test fun recentLongExchangesUseLabelledExactSentencesAndKeepOriginalArchive() {
@@ -64,7 +64,7 @@ class ContinuityHandoffTest {
             val result = ContinuityLogic.export(archive(conversation, listOf(protected)), listOf(conversation)).text
             assertFalse(result.contains("不能再引用的旧话"))
             assertEquals(!deleted, result.contains("用户保存的修订"))
-            assertFalse(result.contains("【接着这里聊】"))
+            assertFalse(result.contains("（上次"))
         }
     }
 
@@ -74,17 +74,17 @@ class ContinuityHandoffTest {
             selectedFragmentIds = emptyList()))
         val off = ContinuityLogic.export(source, listOf(conversation)).text
         assertFalse(off.contains("已经解释过的问题"))
-        assertFalse(off.contains("【接着这里聊】"))
-        assertTrue(off.contains("这些是我这次带来的背景，我们接着聊"))
+        assertFalse(off.contains("（上次"))
+        assertTrue(off.contains("先和我说句话吧"))
         val recent = ContinuityLogic.buildPlan(source.copy(continuity = source.continuity.copy(includeRecent = true)), listOf(conversation))
         assertTrue(recent.export.text.contains("已经解释过的问题"))
-        assertTrue(recent.export.text.contains("最后一段是你当时的回应"))
-        assertFalse(recent.export.text.contains("这些是我这次带来的背景，我们接着聊"))
+        assertTrue(recent.export.text.contains("上次最后一段是你说的话"))
+        assertTrue(recent.export.text.contains("先和我说句话吧"))
         assertFalse(recent.export.text.contains("等我接着说"))
         val next = ContinuityLogic.export(source.copy(continuity = source.continuity.copy(includeRecent = true, nextMessage = "现在想聊另一件事。")), listOf(conversation)).text
         assertTrue(next.endsWith("现在想聊另一件事。\n"))
         assertFalse(next.contains("等我接着说"))
-        assertFalse(next.contains("这些是我这次带来的背景，我们接着聊"))
+        assertFalse(next.contains("先和我说句话吧"))
     }
 
     @Test fun reversedRangesStillUseBranchOrderButMultipleBranchesHaveNoGlobalStop() {
@@ -93,12 +93,12 @@ class ContinuityHandoffTest {
             ArchiveSourceScope("c", "b", listOf("u0", "a0"))))
         val plan = ContinuityLogic.buildPlan(source, listOf(conversation))
         assertEquals("u1", plan.recentFragments.last().messages.last().id)
-        assertTrue(plan.export.text.contains("我想从这句话接着聊"))
-        assertFalse(plan.export.text.contains("这些是我这次带来的背景，我们接着聊"))
+        assertTrue(plan.export.text.contains("上次停在我的这句话"))
+        assertTrue(plan.export.text.contains("先和我说句话吧"))
         val second = ConversationBranch("second", "另一个版本", listOf(user("u2", "另一个问题"), assistant("a2", "另一个回答")))
         val branched = conversation.copy(branches = conversation.branches + second)
         val mixed = source.copy(sourceScopes = source.sourceScopes + ArchiveSourceScope("c", "second", listOf("u2", "a2")))
-        assertFalse(ContinuityLogic.export(mixed, listOf(branched)).text.contains("【接着这里聊】"))
+        assertFalse(ContinuityLogic.export(mixed, listOf(branched)).text.contains("（上次"))
     }
 
     @Test fun aUserAtSelectionBoundaryIsNotNecessarilyAwaitingAnAnswer() {
@@ -107,7 +107,7 @@ class ContinuityHandoffTest {
         val text = ContinuityLogic.export(source, listOf(conversation)).text
         assertTrue(text.contains("这句话是否已有回应尚不明确"))
         assertFalse(text.contains("未选的后续回答"))
-        assertFalse(text.contains("我想从这句话接着聊"))
+        assertFalse(text.contains("上次停在我的这句话"))
     }
 
     @Test fun changesRetainConditionsAndRelatedEarlierRecordWithoutInventingSupersession() {
@@ -120,7 +120,7 @@ class ContinuityHandoffTest {
             EntryKind.USER_FACT, continuityCue = ContinuityCue.PREFERENCE)
         val source = archive(conversation, listOf(changed, other, earlier))
         val text = ContinuityLogic.export(source, listOf(conversation)).text
-        assertTrue(text.indexOf("【我后来补充和纠正过的地方】") < text.indexOf(earlier.text))
+        assertTrue(text.indexOf("【后来补充和改口的地方】") < text.indexOf(earlier.text))
         assertTrue(text.indexOf(earlier.text) < text.indexOf(changed.text))
         listOf(earlier, changed, other).forEach { assertEquals(1, Regex(Regex.escape(it.text)).findAll(text).count()) }
         assertEquals(listOf(changed, other, earlier), source.entries)
@@ -136,7 +136,7 @@ class ContinuityHandoffTest {
         assertFalse(result.pinnedOverflow)
         assertTrue(result.text.contains("完整条目仍在原档案"))
         assertTrue(result.text.contains("请接着讨论刚才的结尾。"))
-        assertTrue(result.text.contains("我想从这句话接着聊"))
+        assertTrue(result.text.contains("上次停在我的这句话"))
         assertEquals(entries, source.entries)
     }
 

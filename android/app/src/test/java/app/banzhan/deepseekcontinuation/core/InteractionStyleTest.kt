@@ -31,14 +31,10 @@ class InteractionStyleTest {
             assertTrue(text.indexOf(source.continuity.interactionNotes) < text.indexOf(cue.text))
             assertTrue(text.indexOf(cue.text) < text.indexOf(style.text))
         }
-        assertTrue(text.contains("【我后来补充和纠正过的地方】"))
-        assertTrue(text.indexOf("【我后来补充和纠正过的地方】") < text.indexOf(correction.text))
-        assertTrue(text.contains("明确修正 · 我说过的话 · 原话第3条（我）"))
+        assertTrue(text.contains("【后来补充和改口的地方】"))
+        assertTrue(text.indexOf("【后来补充和改口的地方】") < text.indexOf(correction.text))
         source.entries.forEach { assertEquals(1, Regex(Regex.escape(it.text)).findAll(text).count()) }
         assertEquals(1, plan.responseStyleCount)
-        assertTrue(text.contains("回应方式（情境观察）"))
-        assertTrue(text.contains("原话第2、4条（你）"))
-        assertTrue(text.contains("以我现在的补充和后来的明确修订为准"))
         assertTrue(text.endsWith(source.continuity.nextMessage + "\n"))
     }
 
@@ -73,7 +69,7 @@ class InteractionStyleTest {
         val plan = ContinuityLogic.buildPlan(source, listOf(conversation))
         assertEquals(1, plan.responseStyleCount)
         assertFalse(plan.export.text.contains(valid.text))
-        assertFalse(plan.export.text.contains("【你当时的回应方式】"))
+        assertFalse(plan.export.text.contains("【那时的说话方式】"))
         assertTrue(plan.export.text.contains(invalid.text))
         assertTrue(plan.notices.any { it.contains("已关闭自动回应方式") && it.contains("条目仍保留") })
         assertEquals(snapshot, snapshotJson.encodeToString(source))
@@ -92,7 +88,6 @@ class InteractionStyleTest {
         val source = archive(conversation, styles + duplicate)
         val plan = ContinuityLogic.buildPlan(source, listOf(conversation))
         assertEquals(7, plan.responseStyleCount)
-        assertEquals(4, Regex("回应方式（情境观察）").findAll(plan.export.text).count())
         (0..1).forEach { assertFalse(plan.export.text.contains(styles[it].text)) }
         (2..5).forEach { assertEquals(1, Regex(Regex.escape(styles[it].text)).findAll(plan.export.text).count()) }
         assertTrue((2..5).map { plan.export.text.indexOf(styles[it].text) }.zipWithNext().all { (a, b) -> a < b })

@@ -52,16 +52,17 @@ class PoliticalExportUiTest {
                 }
             }
             awaitCopyEnabled()
-            compose.onNodeWithText("复制温和版").assertIsDisplayed().performClick()
-            compose.onNodeWithText("保存温和版").assertIsDisplayed().performClick()
+            compose.onNodeWithText("去除敏感内容").assertIsDisplayed()
+            compose.onNodeWithText("复制结果").assertIsDisplayed().performClick()
+            compose.onNodeWithText("保存结果").assertIsDisplayed().performClick()
             assertEquals(omitted, copied.get())
             assertEquals(omitted, saved.get())
 
             val endText = "已显示全部 ${omitted.length} 字符"
             scrollTo(endText).assertIsDisplayed()
             compose.onNode(hasText(TAIL_MARKER, substring = true)).assertIsDisplayed()
-            compose.onNodeWithText("复制温和版").assertIsDisplayed()
-            compose.onNodeWithText("保存温和版").assertIsDisplayed()
+            compose.onNodeWithText("复制结果").assertIsDisplayed()
+            compose.onNodeWithText("保存结果").assertIsDisplayed()
             screenshot("political-long-preview-end.png")
 
             scrollTo("查看 1 处命中原文与原因").performClick()
@@ -71,8 +72,8 @@ class PoliticalExportUiTest {
             awaitCopyEnabled()
             copied.set(null)
             saved.set(null)
-            compose.onNodeWithText("复制温和版").assertIsDisplayed().performClick()
-            compose.onNodeWithText("保存温和版").assertIsDisplayed().performClick()
+            compose.onNodeWithText("复制结果").assertIsDisplayed().performClick()
+            compose.onNodeWithText("保存结果").assertIsDisplayed().performClick()
             assertEquals(snapshot, copied.get())
             assertEquals(snapshot, saved.get())
             assertEquals(originalArchive, appJson.encodeToString(fixture.first))
@@ -98,8 +99,8 @@ class PoliticalExportUiTest {
                 }
             }
             compose.onNodeWithText("继续检查").assertIsDisplayed().assertIsEnabled()
-            compose.onNodeWithText("复制温和版").assertDoesNotExist()
-            compose.onNodeWithText("保存温和版").assertDoesNotExist()
+            compose.onNodeWithText("复制结果").assertDoesNotExist()
+            compose.onNodeWithText("保存结果").assertDoesNotExist()
             compose.onNodeWithText("开始检查").assertDoesNotExist()
             screenshot("political-unfinished-no-export.png")
             compose.onNodeWithText("关闭").performClick()
@@ -120,9 +121,9 @@ class PoliticalExportUiTest {
         } else "这是一段完全虚构的写作讨论。"
         val messages = listOf(ChatMessage("ordinary", "user", ordinary),
             ChatMessage("hit", "user", HIT_MARKER), ChatMessage("tail", "user", TAIL_MARKER))
-        val conversation = ImportedConversation("political-ui-source", "温和版合成来源", branches = listOf(
+        val conversation = ImportedConversation("political-ui-source", "敏感内容检查合成来源", branches = listOf(
             ConversationBranch("main", "当前版本", messages, true)), currentBranchId = "main")
-        val archive = Archive("political-ui-archive", "温和版界面测试", listOf(conversation.id),
+        val archive = Archive("political-ui-archive", "敏感内容检查界面测试", listOf(conversation.id),
             messages.map { ArchiveEntry("entry-${it.id}", EntryCategory.RECENT, it.content, listOf(it.id), EntryKind.USER_FACT) },
             updatedAt = 1, generationMode = "summary", continuity = ContinuitySettings(enabled = false),
             sourceScopes = listOf(ArchiveSourceScope(conversation.id, "main", messages.map { it.id })))
@@ -181,7 +182,7 @@ class PoliticalExportUiTest {
     }
 
     private fun awaitCopyEnabled() = compose.waitUntil(10_000) {
-        compose.onAllNodes(hasText("复制温和版") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+        compose.onAllNodes(hasText("复制结果") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
     }
 
     private fun scrollTo(text: String): SemanticsNodeInteraction {

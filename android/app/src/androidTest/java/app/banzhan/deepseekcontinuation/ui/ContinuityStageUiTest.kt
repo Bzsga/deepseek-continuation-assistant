@@ -31,6 +31,13 @@ class ContinuityStageUiTest {
         }
         compose.onNodeWithText("没接上，调整一下").assertIsDisplayed()
         compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
+        assertRepairActionsInsideSafeArea()
+        scrollToRepairText("补充哪里没接上（可选）").assertIsDisplayed()
+        val body = compose.onNodeWithTag("repair-dialog-body").fetchSemanticsNode().boundsInRoot
+        val optional = compose.onNodeWithText("补充哪里没接上（可选）").fetchSemanticsNode().boundsInRoot
+        val density = InstrumentationRegistry.getInstrumentation().targetContext.resources.displayMetrics.density
+        assertTrue("Short content should not leave a large blank area", body.bottom - optional.bottom < 36f * density)
+        screenshot("repair-compact-before-generate.png")
         compose.onNodeWithText("生成修正内容").assertIsDisplayed().assertIsEnabled().performClick()
         awaitCopyButton()
         screenshot("repair-default.png")
@@ -38,7 +45,7 @@ class ContinuityStageUiTest {
         compose.runOnIdle {
             val text = requireNotNull(copied.get())
             assertTrue(text.contains("漏了重要背景"))
-            assertTrue(text.contains("当前这段对话"))
+            assertTrue(text.contains("我补上与这次问题有关的背景"))
             assertTrue(text.contains("试做一个短篇"))
             assertEquals(3, fixture.archive.entries.size)
         }
@@ -54,22 +61,24 @@ class ContinuityStageUiTest {
                 ContinuityRepairDialog(fixture.archive, listOf(fixture.conversation), {}, copied::set)
             }
         }
-        compose.onNodeWithText("理解偏了").performClick()
-        compose.onNodeWithText("补充哪里没接上（可选）").performScrollTo().performClick()
-        scrollToLazyText("你现在想补充或纠正的内容").performTextInput(clarification)
-        scrollToLazyText("贴回新会话的回复（可选）").performTextInput(reply)
+        scrollToRepairText("理解偏了").performClick()
+        scrollToRepairText("补充哪里没接上（可选）").performClick()
+        scrollToRepairText("你现在想补充或纠正的内容").performClick().performTextInput(clarification)
+        scrollToRepairText("贴回新会话的回复（可选）").performClick().performTextInput(reply)
+        assertRepairActionsInsideSafeArea()
         screenshot("repair-keyboard-before-generate.png")
         compose.onNodeWithText("生成修正内容").assertIsDisplayed().assertIsEnabled().performClick()
         awaitCopyButton()
         compose.onNodeWithText("关闭").assertIsDisplayed()
         compose.onNodeWithText("复制修正内容").assertIsDisplayed().performClick()
+        assertRepairActionsInsideSafeArea()
         compose.runOnIdle {
             assertTrue(requireNotNull(copied.get()).contains(clarification))
-            assertTrue(requireNotNull(copied.get()).contains("贴回的新回复"))
+            assertTrue(requireNotNull(copied.get()).contains("刚才的回复"))
         }
         screenshot("repair-long-draft.png")
 
-        scrollToLazyText("说话变陌生了").performClick()
+        scrollToRepairText("说话变陌生了").performClick()
         compose.onNodeWithText("复制修正内容").assertDoesNotExist()
         compose.onNodeWithText("生成修正内容").assertIsDisplayed().assertIsEnabled().performClick()
         awaitCopyButton()
@@ -206,6 +215,23 @@ class ContinuityStageUiTest {
             compose.onAllNodes(hasText("复制修正内容")).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithText("复制修正内容").assertIsDisplayed().assertIsEnabled()
+    }
+
+    private fun assertRepairActionsInsideSafeArea() {
+        compose.waitForIdle()
+        val safe = compose.onNodeWithTag("repair-dialog-safe-area").fetchSemanticsNode().boundsInRoot
+        val surface = compose.onNodeWithTag("repair-dialog-surface").fetchSemanticsNode().boundsInRoot
+        val actions = compose.onNodeWithTag("repair-dialog-actions").fetchSemanticsNode().boundsInRoot
+        assertTrue("Dialog height should stay bounded", surface.height <= safe.height * 0.86f)
+        assertTrue("Actions must stay inside the safe area", actions.bottom <= safe.bottom)
+        assertTrue("Actions need bottom breathing room", actions.bottom < surface.bottom)
+        compose.onNodeWithText("关闭").assertIsDisplayed()
+    }
+
+    private fun scrollToRepairText(text: String): SemanticsNodeInteraction {
+        // The compact dialog can legitimately scroll even before optional fields are open.
+        compose.onNodeWithTag("repair-dialog-body").performScrollToNode(hasText(text))
+        return compose.onNodeWithText(text).performScrollTo()
     }
 
     private fun scrollToLazyText(text: String): SemanticsNodeInteraction {

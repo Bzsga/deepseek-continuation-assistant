@@ -11,6 +11,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -70,19 +71,24 @@ internal fun ContinuityRepairDialog(
         // Receive window/IME insets in Compose instead of letting the dialog pan over its actions.
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
-        Box(
-            Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(12.dp),
+        BoxWithConstraints(
+            Modifier.fillMaxSize()
+                .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime))
+                .padding(12.dp).testTag("repair-dialog-safe-area"),
             contentAlignment = Alignment.Center,
         ) {
             Surface(
-                // The parent measures above the keyboard; only the middle content can scroll.
-                Modifier.widthIn(max = 680.dp).fillMaxWidth().fillMaxHeight(0.96f),
+                // Insets are applied once above. Short content wraps; longer content scrolls
+                // within the available height, keeping both title and actions visible.
+                Modifier.widthIn(max = 680.dp).fillMaxWidth()
+                    .heightIn(max = maxHeight * 0.85f).testTag("repair-dialog-surface"),
                 shape = MaterialTheme.shapes.large,
                 color = MaterialTheme.colorScheme.surface,
             ) {
-                Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("没接上，调整一下", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    LazyColumn(Modifier.weight(1f, fill = false).testTag("repair-dialog-body"),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         item {
                             Text("选一种情况，从已有资料准备一小段修正内容，带回正在聊的新会话。",
                                 style = MaterialTheme.typography.bodyMedium)
@@ -157,7 +163,9 @@ internal fun ContinuityRepairDialog(
                                 color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
                         }
                     }
-                    ActionRow {
+                    FlowRow(Modifier.testTag("repair-dialog-actions"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(onClick = ::dismiss) { Text("关闭") }
                         if (result == null) Button(
                             enabled = !preparing && validInput,

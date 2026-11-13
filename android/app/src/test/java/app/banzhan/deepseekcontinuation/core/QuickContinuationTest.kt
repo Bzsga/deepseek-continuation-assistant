@@ -19,7 +19,7 @@ class QuickContinuationTest {
         val result = QuickContinuation.create(archive, listOf(conversation))
         assertTrue(result.text.contains("未进行新的智能整理"))
         assertTrue(result.text.contains(messages.last().content))
-        assertTrue(result.text.contains("最后一段停在我的发言"))
+        assertTrue(result.text.contains("上次停在我的这句话"))
         assertFalse(result.text.contains("不在所选范围的原文"))
         assertFalse(result.text.contains(messages.first().content))
         assertTrue(archive.entries.isEmpty())
@@ -31,7 +31,7 @@ class QuickContinuationTest {
         val text = QuickContinuation.create(archive, listOf(conversation)).text
         assertTrue(text.contains("问题2"))
         assertFalse(text.contains(messages.last().content))
-        assertFalse(text.contains("最后一段停在我的发言"))
+        assertFalse(text.contains("上次停在我的这句话"))
     }
 
     @Test fun originalArchiveRetainsEditsAndTombstonesWithoutReintroducingBlockedOriginals() {

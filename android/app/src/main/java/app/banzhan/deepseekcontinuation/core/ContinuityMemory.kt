@@ -56,10 +56,15 @@ object ContinuityMemory {
             if (section.isEmpty() && !(entry.category == EntryCategory.BACKGROUND && archive.background.isNotBlank())) {
                 addition += sectionHeaderLength(entry.category)
             }
-            if (previous?.kind != entry.kind) addition += kindHeaderLength(entry.kind)
+            val previousLead = previous?.let { ArchiveLogic.continuationEntryLead(it) }
+            val lead = ArchiveLogic.continuationEntryLead(entry)
+            if (lead != null && previousLead != lead) addition += lead.length + 2
             if (next != null) {
-                if (entry.kind != next.kind) addition += kindHeaderLength(next.kind)
-                if (previous?.kind != next.kind) addition -= kindHeaderLength(next.kind)
+                val nextLead = ArchiveLogic.continuationEntryLead(next)
+                if (nextLead != null) {
+                    if (lead != nextLead) addition += nextLead.length + 2
+                    if (previousLead != nextLead) addition -= nextLead.length + 2
+                }
             }
             if (length + addition > maxCharacters) continue
             selected += candidate.index
@@ -143,18 +148,12 @@ object ContinuityMemory {
         EntryKind.ASSISTANT_SUGGESTION -> 2
     }
 
-    // Lengths mirror continuationExport; actual output is rendered there and calibrated once above.
-    private fun kindHeaderLength(kind: EntryKind): Int = 4 + when (kind) {
-        EntryKind.USER_FACT -> "用户陈述".length
-        EntryKind.ASSISTANT_SUGGESTION -> "讨论中的建议".length
-        EntryKind.UNCONFIRMED -> "讨论与理解".length
-    }
-
+    // Section punctuation mirrors continuationExport; entry leads use its shared renderer decision above.
     private fun sectionHeaderLength(category: EntryCategory): Int = 5 + when (category) {
         EntryCategory.BACKGROUND -> "关于我".length
         EntryCategory.PEOPLE -> "重要的人和事".length
-        EntryCategory.DECISIONS -> "已确定的事".length
-        EntryCategory.RECENT -> "接下来要聊的事".length
+        EntryCategory.DECISIONS -> "讨论过的决定".length
+        EntryCategory.RECENT -> "最近聊到的事".length
         EntryCategory.QUOTES -> "重要原话".length
     }
 }

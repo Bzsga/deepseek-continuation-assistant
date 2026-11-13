@@ -1,0 +1,13 @@
+{
+  "source_messages": [
+    {"id": "recall-1", "role": "user", "content": "昨天路过那家旧书店，灯还亮着，我突然有点想笑。为什么会这样，我也说不清。"},
+    {"id": "recall-2", "role": "assistant", "content": "你是不是有点怀念以前去那里的日子？"},
+    {"id": "recall-3", "role": "user", "content": "不完全是怀念，也许只是那盏灯看着挺熟。我还没想明白，先别给它找个心理解释。"},
+    {"id": "recall-4", "role": "assistant", "content": "像是记忆从旁边探了个头，没带说明书。只是个比喻。"},
+    {"id": "recall-5", "role": "user", "content": "哈哈，没带说明书这个说法这次我接得住。但这就是个玩笑，不是说我平时都喜欢这样聊。"},
+    {"id": "recall-6", "role": "assistant", "content": "那就先放在这里，不用急着解释。之后如果想去店里看看，也可以再想想。"},
+    {"id": "recall-7", "role": "user", "content": "也许吧，还没决定要不要再去。朋友小林说她想搬回老街，那是她的打算。"},
+    {"id": "recall-8", "role": "user", "content": "你刚才那句不用急着解释，让我这会儿松了一点。我先记住刚才那个瞬间，别急着给它收个结论。"}
+  ],
+  "context_messages": []
+}

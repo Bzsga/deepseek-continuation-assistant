@@ -27,6 +27,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal const val SENSITIVE_CONTENT_NOTE = "聊天记录中若存在政治敏感内容则可能无法继承对话，可尝试此功能"
+
+@Composable
+internal fun SensitiveContentAction(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    label: String = "去除敏感内容",
+) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        OutlinedButton(onClick = onClick, enabled = enabled) { Text(label) }
+        Text(SENSITIVE_CONTENT_NOTE, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 /** An optional copy of the saved continuation; reviewing or exporting never edits the archive. */
 @Composable
 internal fun PoliticalExportDialog(
@@ -113,13 +128,13 @@ internal fun PoliticalExportDialog(
             color = MaterialTheme.colorScheme.surface,
         ) {
             Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("生成温和版", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text("去除敏感内容", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     item {
                         Text("检查续聊文本中的政治敏感议题，默认省略命中片段，你可以保留误判内容。原档案不变。",
                             style = MaterialTheme.typography.bodyMedium)
                         Spacer(Modifier.height(6.dp))
-                        Text("仅降低被打断概率，可能误判或漏检。", style = MaterialTheme.typography.bodySmall,
+                        Text("仅检查政治敏感议题，可能误判或漏检。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (!state.loaded || (task == null && (currentText == null || preparing))) {
@@ -149,7 +164,7 @@ internal fun PoliticalExportDialog(
                             Text("已检查 ${task.done}/${task.total} 段", fontWeight = FontWeight.SemiBold)
                             if (running) LinearProgressIndicator(Modifier.fillMaxWidth())
                             Text(task.message, style = MaterialTheme.typography.bodyMedium)
-                            Text("关闭后进度仍会保留，可从「生成温和版」返回。", style = MaterialTheme.typography.bodySmall,
+                            Text("关闭后进度仍会保留，可从「去除敏感内容」返回。", style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             if (task.hits.isNotEmpty()) Text("目前发现 ${task.hits.size} 处，全部检查完成后可复制或保存。",
                                 style = MaterialTheme.typography.bodySmall)
@@ -193,7 +208,7 @@ internal fun PoliticalExportDialog(
                             TextButton(onClick = { confirmDiscard = true }, enabled = !acting) { Text("放弃这次检查") }
                         }
                         if (completed) {
-                            item { Text("温和版预览", fontWeight = FontWeight.SemiBold) }
+                            item { Text("去除敏感内容后的预览", fontWeight = FontWeight.SemiBold) }
                             if (variant == null) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
                             if (variantText?.isBlank() == true) item { Text("命中片段全部省略后没有剩余正文。可勾选保留误判片段。") }
                             itemsIndexed(preview) { _, block ->
@@ -213,10 +228,10 @@ internal fun PoliticalExportDialog(
                             enabled = !acting && !preparing && plan != null && plan?.originalText == text) { Text("开始检查") }
                         completed -> {
                             Button(onClick = { variantText?.let(onCopy) }, enabled = !acting && !copyTooLarge && !variantText.isNullOrBlank()) {
-                                Text("复制温和版")
+                                Text("复制结果")
                             }
                             OutlinedButton(onClick = { variantText?.let(onSave) }, enabled = !acting && !variantText.isNullOrBlank()) {
-                                Text("保存温和版")
+                                Text("保存结果")
                             }
                         }
                         running -> OutlinedButton(onClick = { run { manager.pause() } }, enabled = !acting) { Text("暂停检查") }

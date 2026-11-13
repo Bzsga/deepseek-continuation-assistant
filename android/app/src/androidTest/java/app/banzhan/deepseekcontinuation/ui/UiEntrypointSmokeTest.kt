@@ -41,7 +41,7 @@ class UiEntrypointSmokeTest {
         }
         awaitText("复制并打开 DeepSeek")
         compose.onNodeWithText("打开 DeepSeek").assertDoesNotExist()
-        compose.onNodeWithText("生成温和版").assertDoesNotExist()
+        compose.onNodeWithText("去除敏感内容").assertDoesNotExist()
         compose.onNodeWithText("重新整理").assertDoesNotExist()
         compose.onNodeWithText("查看与修改详细内容").assertDoesNotExist()
         screenshot("result-short-primary-actions.png")
@@ -61,7 +61,9 @@ class UiEntrypointSmokeTest {
         assertEquals(copied.get(), saved.get())
         compose.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
         screenshot("result-short-expanded-options.png")
-        compose.onNodeWithText("生成温和版").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithText("去除敏感内容").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(SENSITIVE_CONTENT_NOTE).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("去除敏感内容").performScrollTo().performClick()
         compose.onNodeWithText("查看与修改详细内容").performScrollTo().performClick()
         compose.onNodeWithText("重新整理").performScrollTo().performClick()
         compose.waitForIdle()
@@ -69,13 +71,14 @@ class UiEntrypointSmokeTest {
         assertEquals(1, details.get())
         assertEquals(1, reorganized.get())
         compose.onNodeWithText("收起更多选项").performScrollTo().performClick()
-        compose.onNodeWithText("生成温和版").assertDoesNotExist()
+        compose.onNodeWithText("去除敏感内容").assertDoesNotExist()
         compose.onNodeWithText("复制并打开 DeepSeek").performScrollTo().assertIsDisplayed()
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("下次继续讨论这段虚构故事。", substring = true))
+        compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("收起续聊内容").performScrollTo().performClick()
         compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).assertDoesNotExist()
         compose.onNodeWithText("查看续聊内容（", substring = true).performScrollTo().performClick()
         compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("收起续聊内容").performScrollTo().performClick()
-        compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).assertDoesNotExist()
     }
 
     @Test fun longOriginalKeepsFileAndOpenActionsWithRecoveryVisible() {
@@ -111,9 +114,34 @@ class UiEntrypointSmokeTest {
         compose.onNodeWithText("打开 DeepSeek").assertIsDisplayed()
         screenshot("result-long-file-and-recovery.png")
         compose.onNodeWithText("调整与更多").performScrollTo().performClick()
-        compose.onNodeWithText("生成温和版").assertDoesNotExist()
+        compose.onNodeWithText("去除敏感内容").assertDoesNotExist()
         compose.onNodeWithText("重新整理").assertDoesNotExist()
         compose.onNodeWithText("查看与修改详细内容").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun defaultExpandedLongPreviewCanRevealTheRestWithoutChangingCopiedText() {
+        val archive = Archive("expanded-preview", "合成长预览", emptyList(), listOf(
+            ArchiveEntry("long-entry", EntryCategory.RECENT,
+                "虚构的长记忆，用于检查原文预览。\n".repeat(480) + "长预览末尾标记", edited = true),
+        ), generationMode = "summary")
+        val copied = AtomicReference<String?>(null)
+        compose.setContent {
+            ContinuationTheme {
+                ContinuationResultScreen(archive, null, emptyList(), {}, copied::set, {}, {}, {}, {})
+            }
+        }
+        awaitText("复制并打开 DeepSeek")
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("当前续聊版本预览"))
+        compose.onNodeWithText("当前续聊版本预览").assertIsDisplayed()
+        compose.onNodeWithText("长预览末尾标记", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("继续查看").performScrollTo().performClick()
+        compose.onNodeWithText("长预览末尾标记", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("复制并打开 DeepSeek"))
+        compose.onNodeWithText("复制并打开 DeepSeek").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals(ArchiveLogic.continuationExport(archive, emptyList()).text, copied.get())
+            assertTrue(requireNotNull(copied.get()).contains("长预览末尾标记"))
+        }
     }
 
     @Test fun homeHasOneImportActionAndKeepsHelpAndAlternativeInputReachable() {
