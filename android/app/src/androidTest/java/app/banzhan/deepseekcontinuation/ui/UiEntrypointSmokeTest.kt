@@ -6,6 +6,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.banzhan.deepseekcontinuation.core.*
+import app.banzhan.deepseekcontinuation.data.AppState
 import app.banzhan.deepseekcontinuation.data.OrganizationTask
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -45,16 +46,19 @@ class UiEntrypointSmokeTest {
         compose.onNodeWithText("查看与修改详细内容").assertDoesNotExist()
         screenshot("result-short-primary-actions.png")
         compose.onNodeWithText("复制并打开 DeepSeek").performScrollTo().assertIsDisplayed().performClick()
-        compose.onNodeWithText("保存续聊文件").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithText("保存续聊文件").assertDoesNotExist()
         compose.waitForIdle()
         assertEquals(ArchiveLogic.continuationExport(archive, emptyList()).text, copied.get())
-        assertEquals(copied.get(), saved.get())
+        assertNull(saved.get())
         assertEquals(0, openedOnly.get())
         assertEquals(0, political.get())
         assertEquals(0, reorganized.get())
 
         compose.onNodeWithText("调整与更多").performScrollTo().performClick()
-        compose.onNodeWithText("调整（可选）").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("续聊设置").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("保存续聊文件").performScrollTo().assertIsDisplayed().performClick()
+        compose.waitForIdle()
+        assertEquals(copied.get(), saved.get())
         compose.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
         screenshot("result-short-expanded-options.png")
         compose.onNodeWithText("生成温和版").performScrollTo().assertIsDisplayed().performClick()
@@ -67,6 +71,11 @@ class UiEntrypointSmokeTest {
         compose.onNodeWithText("收起更多选项").performScrollTo().performClick()
         compose.onNodeWithText("生成温和版").assertDoesNotExist()
         compose.onNodeWithText("复制并打开 DeepSeek").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("查看续聊内容（", substring = true).performScrollTo().performClick()
+        compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("收起续聊内容").performScrollTo().performClick()
+        compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).assertDoesNotExist()
     }
 
     @Test fun longOriginalKeepsFileAndOpenActionsWithRecoveryVisible() {
@@ -105,6 +114,66 @@ class UiEntrypointSmokeTest {
         compose.onNodeWithText("生成温和版").assertDoesNotExist()
         compose.onNodeWithText("重新整理").assertDoesNotExist()
         compose.onNodeWithText("查看与修改详细内容").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun homeHasOneImportActionAndKeepsHelpAndAlternativeInputReachable() {
+        val imports = AtomicInteger()
+        val tutorials = AtomicInteger()
+        val pastes = AtomicInteger()
+        val demos = AtomicInteger()
+        compose.setContent {
+            ContinuationTheme {
+                HomeScreen(AppState(), { imports.incrementAndGet() }, { tutorials.incrementAndGet() },
+                    { pastes.incrementAndGet() }, { demos.incrementAndGet() }, {}, {}, {})
+            }
+        }
+        compose.onNodeWithText("导入聊天文件").assertIsDisplayed().performClick()
+        compose.onNodeWithText("如何下载聊天记录").performScrollTo().performClick()
+        compose.onNodeWithText("粘贴聊天内容").assertDoesNotExist()
+        compose.onNodeWithText("体验示例").assertDoesNotExist()
+        compose.onNodeWithText("导入 JSON 文件").assertDoesNotExist()
+        compose.onNodeWithText("今日免费次数").assertDoesNotExist()
+        screenshot("home-simple-import.png")
+        compose.onNodeWithText("其他方式").performScrollTo().performClick()
+        compose.onNodeWithText("粘贴聊天内容").performScrollTo().performClick()
+        compose.onNodeWithText("体验示例").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals(1, imports.get())
+            assertEquals(1, tutorials.get())
+            assertEquals(1, pastes.get())
+            assertEquals(1, demos.get())
+        }
+    }
+
+    @Test fun entryMenuKeepsSourcePinAndDeleteBehindAnExplicitChoice() {
+        val edits = AtomicInteger()
+        val pins = AtomicInteger()
+        val sources = AtomicInteger()
+        val deletes = AtomicInteger()
+        val entry = ArchiveEntry("entry-menu", EntryCategory.RECENT, "这条合成记忆仍未决定。", listOf("u1"))
+        compose.setContent {
+            ContinuationTheme {
+                ArchiveEntryActions(entry, { edits.incrementAndGet() }, { pins.incrementAndGet() },
+                    { sources.incrementAndGet() }, { deletes.incrementAndGet() })
+            }
+        }
+        compose.onNodeWithText("固定").assertDoesNotExist()
+        compose.onNodeWithText("来源 1").assertDoesNotExist()
+        compose.onNodeWithText("删除").assertDoesNotExist()
+        compose.onNodeWithText("编辑").assertIsDisplayed().performClick()
+        compose.onNodeWithText("条目操作").performClick()
+        compose.onNodeWithText("来源 1").assertIsDisplayed().performClick()
+        compose.onNodeWithText("来源 1").assertDoesNotExist()
+        compose.onNodeWithText("条目操作").performClick()
+        compose.onNodeWithText("固定").performClick()
+        compose.onNodeWithText("条目操作").performClick()
+        compose.onNodeWithText("删除").performClick()
+        compose.runOnIdle {
+            assertEquals(1, edits.get())
+            assertEquals(1, sources.get())
+            assertEquals(1, pins.get())
+            assertEquals(1, deletes.get())
+        }
     }
 
     private fun awaitText(text: String) = compose.waitUntil(10_000) {

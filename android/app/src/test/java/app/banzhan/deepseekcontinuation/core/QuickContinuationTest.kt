@@ -59,7 +59,7 @@ class QuickContinuationTest {
         assertTrue(text.contains("我当前提供的背景"))
         assertTrue(text.contains("先说判断再说明依据"))
         assertTrue(text.contains("请直接讨论新的问题"))
-        assertTrue(text.contains("优先回应我接下来想说的内容"))
+        assertTrue(text.endsWith(archive.continuity.nextMessage + "\n"))
     }
 
     @Test fun emptyAndInvalidSelectionsAreRejectedLocally() {

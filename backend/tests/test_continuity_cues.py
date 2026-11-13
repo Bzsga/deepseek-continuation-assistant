@@ -143,8 +143,8 @@ def test_generated_entry_accepts_absent_and_explicit_null_cue():
 
 def test_v9_retains_priority_with_v6_schema_sources_and_output_budget(settings, messages):
     snapshot, reserve = snapshot_for(settings, messages)
-    assert CURRENT_PROTOCOL_VERSION == snapshot["protocol_version"] == 9
-    prompt = provider_messages(messages, snapshot["output_bound"], protocol_version=9)
+    assert CURRENT_PROTOCOL_VERSION == snapshot["protocol_version"] == 10
+    prompt = provider_messages(messages, snapshot["output_bound"], protocol_version=10)
     old_prompt = provider_messages(messages, snapshot["output_bound"], protocol_version=6)
     payload, old_payload = (json.loads(value[1]["content"]) for value in (prompt, old_prompt))
     schema = payload["output_schema"]["properties"]["entries"]
@@ -210,7 +210,7 @@ def test_http_extracts_cues_with_one_request_and_no_repair_call(settings, messag
     assert outcome.usage_known and (outcome.input_tokens, outcome.output_tokens, outcome.cost_micros) == (100, 80, 840)
     request = requests[0]
     assert request["max_tokens"] == snapshot["output_bound"] == 2048
-    assert request["messages"] == provider_messages(messages, 2048, protocol_version=9)
+    assert request["messages"] == provider_messages(messages, 2048, protocol_version=10)
     wire = json.loads(request["messages"][1]["content"])
     assert "continuityCue" in wire["output_schema"]["properties"]["entries"]["items"]["properties"]
     assert "先覆盖本段彼此不重复的用户明确交流要求" in wire["output_requirements"]

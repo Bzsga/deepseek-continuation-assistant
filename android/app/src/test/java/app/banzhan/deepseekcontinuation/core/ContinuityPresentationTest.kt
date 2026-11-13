@@ -72,7 +72,7 @@ class ContinuityPresentationTest {
         assertTrue(full.export.text.indexOf(open.text) < full.export.text.indexOf(detail.text))
         assertEquals(0, full.export.omittedCount)
         for (result in listOf(plan, full)) {
-            assertTrue(result.export.text.contains("不把早期待定事项自动当成现在仍未解决"))
+            assertTrue(result.export.text.contains("当时的进展、相关理由和待定之处"))
         }
         assertEquals(listOf(detail, open), source.entries)
     }

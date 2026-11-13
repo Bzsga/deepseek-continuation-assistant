@@ -36,7 +36,7 @@ class ContinuityLogicTest {
             fragment.messages.any { it.id == "u0" } && fragment.messages.any { it.id == "a1" }
         })
         assertFalse(separated.export.text.contains("回答1"))
-        assertTrue(separated.export.text.contains("片段之间可能有未选内容"))
+        assertTrue(separated.export.text.contains("间隔处可能还有未附带的对话"))
     }
 
     @Test fun invalidScopesAndAmbiguousOldBranchesNeverExpandTheSelectedRange() {
@@ -140,7 +140,7 @@ class ContinuityLogicTest {
         assertEquals(1, Regex("原始问题").findAll(result).count())
         assertTrue(result.contains("修订后的最后一句"))
         assertFalse(result.contains("旧的最后一句"))
-        assertFalse(result.contains("不必重复回答上一轮"))
+        assertFalse(result.contains("最后一段是你当时的回应"))
         assertFalse(result.contains("【原文片段"))
         assertTrue(result.contains("先听我说完。"))
     }
@@ -153,7 +153,7 @@ class ContinuityLogicTest {
         assertEquals(entry, Json.decodeFromString<ArchiveEntry>(Json.encodeToString(entry)))
         val base = archive(conversation).copy(entries = listOf(entry), continuity = ContinuitySettings(enabled = false))
         assertEquals(ArchiveLogic.continuationExport(base), ContinuityLogic.export(base, listOf(conversation)))
-        assertFalse(ContinuityLogic.export(base, listOf(conversation)).text.contains("【自动交流线索】"))
+        assertFalse(ContinuityLogic.export(base, listOf(conversation)).text.contains("【我说过的要求与修正】"))
     }
 
     @Test fun verifiedCuesRetainFullTextAndKindsInSourceOrderWithoutDuplicatingFacts() {
@@ -171,16 +171,14 @@ class ContinuityLogicTest {
             includeRecent = false, selectedFragmentIds = emptyList(), interactionNotes = "保留我的手填说明。", nextMessage = "我现在想补充一句。"))
         val plan = ContinuityLogic.buildPlan(base, listOf(conversation))
         val text = plan.export.text
-        assertTrue(text.contains("【自动交流线索】"))
+        assertTrue(text.contains("【我说过的要求与修正】"))
         assertFalse(text.contains("【已保存的续聊内容】"))
         entries.forEach { assertEquals(1, Regex(Regex.escape(it.text)).findAll(text).count()) }
         assertTrue(text.indexOf(earlier.text) < text.indexOf(correction.text))
         assertTrue(text.indexOf(correction.text) < text.indexOf(shared.text))
         assertTrue(text.indexOf(shared.text) < text.indexOf(open.text))
-        assertTrue(text.contains("交流偏好 · 关于我 · 用户陈述 · 来源角色：用户 · 第1条"))
-        assertTrue(text.contains("共同说法 · 重要的人和事 · 讨论中的建议 · 来源角色：用户、助手 · 第3、4条"))
-        assertTrue(text.contains("只在同一事项上"))
-        assertTrue(text.contains("不要把不同主题或版本互相覆盖"))
+        assertTrue(text.contains("交流偏好 · 我说过的话 · 原话第1条（我）"))
+        assertTrue(text.contains("共同说法 · 你提出的想法 · 原话第3、4条（我、你）"))
         assertTrue(text.contains(base.continuity.interactionNotes))
         assertTrue(text.contains(base.continuity.nextMessage))
         assertTrue(plan.includedFragmentIds.isEmpty())
@@ -211,7 +209,7 @@ class ContinuityLogicTest {
             ArchiveSourceScope("c", "first", listOf("shared", "answer-a")), ArchiveSourceScope("c", "second", listOf("shared", "answer-b"))),
             continuity = ContinuitySettings(enabled = true, includeRecent = false, selectedFragmentIds = emptyList()))
         val text = ContinuityLogic.export(base, listOf(conversation)).text
-        assertFalse(text.contains("【自动交流线索】"))
+        assertFalse(text.contains("【我说过的要求与修正】"))
         assertTrue(text.contains(ArchiveLogic.continuationExport(base, includeGuidance = false).text))
         entries.forEach { assertEquals(1, Regex(Regex.escape(it.text)).findAll(text).count()) }
     }
@@ -225,17 +223,17 @@ class ContinuityLogicTest {
         assertEquals(1, ContinuityLogic.buildPlan(base, listOf(conversation)).recommendedFragments.size)
         for (entry in listOf(cue.copy(edited = true, text = "以手改内容为准。"), cue.copy(deleted = true), cue.copy(continuityCue = null))) {
             val plan = ContinuityLogic.buildPlan(base.copy(entries = listOf(fact(), entry)), listOf(conversation))
-            assertFalse(plan.export.text.contains("【自动交流线索】"))
+            assertFalse(plan.export.text.contains("【我说过的要求与修正】"))
             assertTrue(plan.recommendedFragments.isEmpty())
             if (entry.deleted) assertFalse(plan.export.text.contains(entry.text)) else assertTrue(plan.export.text.contains(entry.text))
         }
         val blockedByOtherEntry = ContinuityLogic.buildPlan(base.copy(entries = listOf(cue,
             fact().copy(id = "edited", sourceIds = listOf("u0"), edited = true))), listOf(conversation))
-        assertFalse(blockedByOtherEntry.export.text.contains("【自动交流线索】"))
+        assertFalse(blockedByOtherEntry.export.text.contains("【我说过的要求与修正】"))
         assertTrue(blockedByOtherEntry.export.text.contains(cue.text))
         for (pinned in listOf(true, false)) {
             val plan = ContinuityLogic.buildPlan(base.copy(entries = listOf(cue.copy(pinned = pinned))), listOf(conversation))
-            assertTrue(plan.export.text.contains("【自动交流线索】"))
+            assertTrue(plan.export.text.contains("【我说过的要求与修正】"))
             assertEquals(1, plan.recommendedFragments.size)
         }
     }
@@ -251,7 +249,7 @@ class ContinuityLogicTest {
         assertEquals(2, plan.recommendedFragments.size)
         assertEquals(2, plan.selectedFragmentIds.size)
         assertEquals(2, plan.includedFragmentIds.size)
-        assertTrue(plan.export.text.contains("来源角色：用户 · 第1、5条"))
+        assertTrue(plan.export.text.contains("原话第1、5条（我）"))
         assertFalse(plan.export.text.contains("提问1"))
         assertTrue(plan.recommendedFragments.all { it.messages.size == 2 })
         val empty = ContinuityLogic.buildPlan(base.copy(continuity = base.continuity.copy(selectedFragmentIds = emptyList())), listOf(conversation))
@@ -296,16 +294,16 @@ class ContinuityLogicTest {
         val pending = ContinuityLogic.buildPlan(base, listOf(conversation))
         assertTrue(pending.recentFragments.last().title.contains("待回应"))
         assertEquals(messages.last(), pending.recentFragments.last().messages.single())
-        assertTrue(pending.export.text.contains("请从这句话继续回应"))
+        assertTrue(pending.export.text.contains("我想从这句话接着聊"))
         println("SYNTHETIC_PENDING_USER_EXPORT\n${pending.export.text}")
 
         val finished = base.copy(sourceScopes = listOf(ArchiveSourceScope("c", "b", messages.dropLast(1).map { it.id })))
         val assistantLast = ContinuityLogic.buildPlan(finished, listOf(conversation))
-        assertTrue(assistantLast.export.text.contains("不必重复回答上一轮"))
+        assertTrue(assistantLast.export.text.contains("最后一段是你当时的回应"))
         println("SYNTHETIC_ASSISTANT_LAST_EXPORT\n${assistantLast.export.text}")
         val next = ContinuityLogic.export(finished.copy(continuity = finished.continuity.copy(nextMessage = "我先写了一句：窗外有很轻的脚步声。")), listOf(conversation))
         assertTrue(next.text.contains("【我接下来想说】\n我先写了一句：窗外有很轻的脚步声。"))
-        assertFalse(next.text.contains("不必重复回答上一轮"))
+        assertFalse(next.text.contains("最后一段是你当时的回应"))
         println("SYNTHETIC_NEXT_MESSAGE_EXPORT\n${next.text}")
     }
 

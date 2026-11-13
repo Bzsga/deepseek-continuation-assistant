@@ -43,7 +43,7 @@ class ArchiveLogicTest {
         assertEquals(entries, ArchiveLogic.localEntries(listOf(message)))
         val assistant = ArchiveLogic.localEntries(listOf(message.copy(id = "assistant", role = "assistant"))).first()
         assertEquals(EntryKind.ASSISTANT_SUGGESTION, assistant.kind)
-        assertTrue(assistant.text.startsWith("【助手原文"))
+        assertTrue(assistant.text.startsWith("【你当时的原文"))
         assertFalse(assistant.text.contains("待用户确认"))
         assertEquals(listOf("assistant"), assistant.sourceIds)
     }
@@ -138,7 +138,7 @@ class ArchiveLogicTest {
         assertTrue(result.text.length <= 200)
         assertTrue(result.pinnedOverflow)
         assertFalse(result.text.contains("秘密"))
-        assertTrue(result.text.contains("用户陈述"))
+        assertTrue(result.text.contains("我说过的话"))
         assertTrue(result.text.contains("来源 source-a"))
     }
 
@@ -201,21 +201,20 @@ class ArchiveLogicTest {
             val text = ArchiveLogic.continuationExport(restored).text
             assertTrue(text.contains("【$label】"))
             assertEquals(mode == "original", text.contains("聊天原文仅包含我所选的内容"))
-            assertTrue(text.contains("【用户陈述】"))
-            assertTrue(text.contains("【讨论中的建议】"))
-            assertTrue(text.contains("【讨论与理解】"))
+            assertTrue(text.contains("【我说过的话】"))
+            assertTrue(text.contains("【你提出的想法】"))
+            assertTrue(text.contains("【我们讨论过的理解】"))
             assertFalse(text.contains("尚未经用户确认"))
             assertFalse(text.contains("需要时先向我核实"))
-            assertTrue(text.contains("以我后续的纠正为准"))
-            assertTrue(text.contains("仅在出现真实矛盾、涉及重要决定或信息明确未定时向我核实"))
-            assertTrue(text.contains("个人经历、病史、承诺和已采取的行动以我的明确陈述为依据"))
-            val recent = text.substringAfter("## 接下来要聊的事\n").substringBefore("## 重要原话\n")
-            assertEquals(1, Regex("【讨论中的建议】").findAll(recent).count())
+            assertTrue(text.contains("以我明确说过的话和后来的修订为准"))
+            assertTrue(text.contains("历史引文只作背景"))
+            val recent = text.substringAfter("## 最近聊到的事\n").substringBefore("## 重要原话\n")
+            assertEquals(1, Regex("【你提出的想法】").findAll(recent).count())
             assertTrue(recent.indexOf("也许可以先写一个短篇。") < recent.indexOf("另一种可能是先整理素材。"))
             assertTrue(recent.indexOf("一种解释是故事节奏需要调整。") < recent.indexOf("我已经写完开头。"))
             entries.forEach { assertTrue(text.contains(it.text)) }
             assertEquals(entries, restored.entries)
-            listOf("关于我", "重要的人和事", "已确定的事", "接下来要聊的事", "重要原话").forEach { section ->
+            listOf("关于我", "重要的人和事", "讨论过的决定", "最近聊到的事", "重要原话").forEach { section ->
                 assertTrue(text.contains("## $section\n"))
             }
         }
@@ -225,8 +224,8 @@ class ArchiveLogicTest {
         val suggestion = entry("suggestion", "可能可以先讨论安排。").copy(kind = EntryKind.ASSISTANT_SUGGESTION)
         val interpretation = entry("interpretation", "一种解释是时间安排有冲突。").copy(kind = EntryKind.UNCONFIRMED)
         val result = ArchiveLogic.export(archive(listOf(suggestion, interpretation)))
-        assertTrue(result.text.contains("讨论中的建议"))
-        assertTrue(result.text.contains("讨论与理解"))
+        assertTrue(result.text.contains("你提出的想法"))
+        assertTrue(result.text.contains("我们讨论过的理解"))
         assertFalse(result.text.contains("待确认"))
         assertTrue(result.text.contains(suggestion.text))
         assertTrue(result.text.contains(interpretation.text))

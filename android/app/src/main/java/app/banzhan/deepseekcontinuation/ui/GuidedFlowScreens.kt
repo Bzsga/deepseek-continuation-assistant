@@ -638,7 +638,6 @@ internal fun ContinuationResultScreen(
     onOpenRecord: (String) -> Unit = {},
     onPoliticalExport: () -> Unit = {},
     onRepair: () -> Unit = {},
-    onQuick: (() -> Unit)? = null,
     onAddRecent: (() -> Unit)? = null,
 ) {
     var export by remember(archive, conversations) { mutableStateOf<Result<ExportResult>?>(null) }
@@ -654,6 +653,7 @@ internal fun ContinuationResultScreen(
         export = prepared.first
     }
     var previewLimit by rememberSaveable(archive.id) { mutableIntStateOf(8000) }
+    var showPreview by rememberSaveable(archive.id) { mutableStateOf(false) }
     var showMoreActions by rememberSaveable(archive.id) { mutableStateOf(false) }
     val text = export?.getOrNull()?.text
     val unfinished = task != null && task.status != "completed"
@@ -727,7 +727,6 @@ internal fun ContinuationResultScreen(
                             Spacer(Modifier.width(6.dp))
                             Text("复制并打开 DeepSeek")
                         }
-                    if (!large) OutlinedButton(onClick = { onSave(text) }) { Text("保存续聊文件") }
                     if (large) OutlinedButton(onClick = onOpenDeepSeek) { Text("打开 DeepSeek") }
                 }
                 Text(
@@ -749,6 +748,7 @@ internal fun ContinuationResultScreen(
                     ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
                 }
                 ActionRow {
+                onAddRecent?.let { add -> TextButton(onClick = add) { Text("补入最近聊天") } }
                 TextButton(onClick = onRepair) { Text("没接上？调整一下") }
                 TextButton(onClick = { showMoreActions = !showMoreActions }) {
                     Icon(if (showMoreActions) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
@@ -759,8 +759,7 @@ internal fun ContinuationResultScreen(
                 if (showMoreActions) {
                     ContinuitySetupCard(archive, conversations, onSaveContinuity)
                     ActionRow {
-                        onAddRecent?.let { add -> TextButton(onClick = add) { Text("补入最近聊天") } }
-                        onQuick?.let { quick -> TextButton(onClick = quick) { Text("使用快速版") } }
+                        if (!large) OutlinedButton(onClick = { onSave(text) }) { Text("保存续聊文件") }
                         if (archive.generationMode == "summary") {
                             OutlinedButton(onClick = onPoliticalExport, enabled = !busy) { Text("生成温和版") }
                         }
@@ -772,6 +771,12 @@ internal fun ContinuationResultScreen(
                 }
             }
             item {
+                TextButton(onClick = { showPreview = !showPreview }) {
+                    Icon(if (showPreview) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        null, Modifier.size(18.dp))
+                    Text(if (showPreview) "收起续聊内容" else "查看续聊内容（${text.length} 字符）")
+                }
+                if (showPreview)
                 Surface(shape = MaterialTheme.shapes.medium) {
                     Column(
                         Modifier.fillMaxWidth().padding(18.dp),

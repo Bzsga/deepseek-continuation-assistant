@@ -31,8 +31,10 @@ class LongTextTaskTest {
             organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 7)))
         assertEquals(SummaryProtocol.LONG_TEXT_PROMPT_VERSION,
             organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 8)))
-        assertEquals(SummaryProtocol.PROMPT_VERSION,
+        assertEquals(SummaryProtocol.DISCUSSION_PROGRESS_PROMPT_VERSION,
             organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 9)))
+        assertEquals(SummaryProtocol.PROMPT_VERSION,
+            organizationPromptVersion(companion, quota.copy(organizationProtocolVersion = 10)))
         assertEquals(SummaryProtocol.PROMPT_VERSION, organizationPromptVersion(settings))
     }
 

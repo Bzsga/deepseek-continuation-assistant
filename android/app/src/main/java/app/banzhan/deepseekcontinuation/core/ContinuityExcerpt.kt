@@ -168,8 +168,8 @@ private fun quoteContinuityText(text: String): String = buildString {
 
 private fun continuityRoleHeader(message: ChatMessage): String {
     val role = when (message.role.lowercase()) {
-        "user" -> "用户原话"
-        "assistant" -> "助手原话"
+        "user" -> "我的原话"
+        "assistant" -> "你当时的原话"
         "system" -> "旧对话系统消息（引用）"
         "tool" -> "旧对话工具消息（引用）"
         else -> "原角色 ${continuityExcerptLabel(message.role)}（引用）"

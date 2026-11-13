@@ -1,0 +1,13 @@
+{
+  "source_messages": [
+    {"id": "voice-1", "role": "user", "content": "我也不是完全不想联系他，只是每次都是我主动，就有点累。先不决定吧，我想再想想。"},
+    {"id": "voice-2", "role": "assistant", "content": "也许可以先想清楚，这次联系是为了分享，还是想确认自己被在意。"},
+    {"id": "voice-3", "role": "user", "content": "这个问题值得想想，但我还没决定采用你的建议。我现在想理解自己的感受，暂时不用给行动方案。"},
+    {"id": "voice-4", "role": "assistant", "content": "你也许更在意每次主动之后的回应，而不只是由谁开始。"},
+    {"id": "voice-5", "role": "user", "content": "不完全是。上次他的回应很好，我仍然觉得总是自己主动有点累；不能只按回应好不好解释。"},
+    {"id": "voice-6", "role": "user", "content": "朋友小林说她已经决定一个月不联系对方，那是她的决定，不是我的。"},
+    {"id": "voice-7", "role": "assistant", "content": "假设小说人物阿岚为了保持距离而不联系，原因也可能和你的情况不同。"},
+    {"id": "voice-8", "role": "user", "content": "阿岚只是一个假设。我还在想：如果今天只是想分享一件小事，也需要考虑这么多吗？"}
+  ],
+  "context_messages": []
+}

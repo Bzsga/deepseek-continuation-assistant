@@ -611,7 +611,6 @@ fun ContinuationApp(
                                     { openRecord(it) },
                                     { imported(state.conversations.map { it.id }) },
                                     { route = "tasks" },
-                                    { run { controller.refreshQuota() } },
                                 )
                             "choose" ->
                                 ConversationPickerScreen(
@@ -778,7 +777,6 @@ fun ContinuationApp(
                                         onOpenRecord = { openRecord(it) },
                                         onPoliticalExport = { politicalArchiveId = archive.id },
                                         onRepair = { repairArchiveId = archive.id },
-                                        onQuick = { quickArchive = archive },
                                         onAddRecent = { route = "add_recent" },
                                     )
                             }

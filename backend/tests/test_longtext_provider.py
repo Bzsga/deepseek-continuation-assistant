@@ -64,7 +64,7 @@ def test_v9_has_separate_reference_scope_stable_primary_aliases_and_full_reserva
     assert payload["context_messages"] == [{**source, "id": f"m{index+3}"} for index, source in enumerate(context)]
     assert payload["source_messages"] == json.loads(provider_messages(primary)[1]["content"])["source_messages"]
     actual_bound = sum(len(item["content"].encode("utf-8")) for item in prompt) + 1024
-    assert snapshot["protocol_version"] == 9 and snapshot["input_bound"] == actual_bound
+    assert snapshot["protocol_version"] == 10 and snapshot["input_bound"] == actual_bound
     assert reserve == 2 * actual_bound + 8 * settings.max_output_tokens
     assert snapshot["input_bound"] > snapshot_for(settings, primary)[0]["input_bound"]
     assert all("content" not in key and "messages" not in key for key in snapshot)

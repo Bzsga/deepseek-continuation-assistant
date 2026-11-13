@@ -9,8 +9,7 @@ def test_progress_protocol_is_an_additive_version_with_the_same_quoted_scope_and
     old = provider_messages(current, protocol_version=8, context_messages=context)
     new = provider_messages(current, protocol_version=9, context_messages=context)
     old_body, new_body = (json.loads(prompt[1]["content"]) for prompt in (old, new))
-    assert CURRENT_PROTOCOL_VERSION == 9
-    assert new == provider_messages(current, context_messages=context)
+    assert CURRENT_PROTOCOL_VERSION >= 9
     assert new[0] == old[0]
     assert new_body["source_messages"] == old_body["source_messages"]
     assert new_body["context_messages"] == old_body["context_messages"]

@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -52,6 +53,8 @@ internal fun SettingsScreen(
     var testResult by remember { mutableStateOf<String?>(null) }
     var clearConfirmation by remember { mutableStateOf(false) }
     var serviceProblem by remember { mutableStateOf<String?>(null) }
+    var serviceExpanded by rememberSaveable { mutableStateOf(setupOnly) }
+    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
     LazyColumn(
         Modifier.fillMaxSize().imePadding(),
         contentPadding = PaddingValues(20.dp),
@@ -68,7 +71,23 @@ internal fun SettingsScreen(
                 TextButton(onClick = onAbout) { Text("关于与开源致谢") }
             }
         }
-        item { SectionTitle("整理服务", "免费服务可以直接使用，也可以选择自己的 API。") }
+        if (!setupOnly) item {
+            Card(onClick = { serviceExpanded = !serviceExpanded },
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("整理服务", fontWeight = FontWeight.SemiBold)
+                        Text(if (settings.mode == "companion") "免费智能整理" else "自己的 API · ${settings.model}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Icon(if (serviceExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        if (serviceExpanded) "收起服务设置" else "展开服务设置")
+                }
+            }
+        }
+        if (serviceExpanded || setupOnly) {
+        if (setupOnly) item { SectionTitle("整理服务", "免费服务可以直接使用，也可以选择自己的 API。") }
         item {
             ActionRow {
                 FilterChip(
@@ -236,7 +255,7 @@ internal fun SettingsScreen(
                         if (setupOnly) {
                             serviceProblem = controller.checkOrganizationAvailability()
                             if (serviceProblem == null) onReady()
-                        }
+                        } else serviceExpanded = false
                     }
                 },
                 enabled = !busy && !testing,
@@ -250,19 +269,13 @@ internal fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
         }
-        item {
-            TextButton(onClick = onDeveloper) {
-                Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(7.dp))
-                Text("开发者选项")
-            }
         }
         if (!setupOnly) {
             item {
                 TextButton(onClick = onFeedback) {
                     Icon(Icons.Outlined.MailOutline, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(7.dp))
-                    Text("意见信箱与我的反馈")
+                    Text("意见反馈")
                 }
             }
             item {
@@ -276,8 +289,15 @@ internal fun SettingsScreen(
                 }
             }
             item {
-                TextButton(onClick = { clearConfirmation = true }, enabled = !busy) {
-                    Text("清除本地资料", color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { advancedExpanded = !advancedExpanded }) {
+                    Icon(if (advancedExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)
+                    Text(if (advancedExpanded) "收起高级选项" else "高级选项")
+                }
+                if (advancedExpanded) ActionRow {
+                    TextButton(onClick = onDeveloper) { Text("开发者选项") }
+                    TextButton(onClick = { clearConfirmation = true }, enabled = !busy) {
+                        Text("清除本地资料", color = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         }

@@ -31,7 +31,6 @@ internal fun HomeScreen(
     onRecord: (String) -> Unit,
     onBrowse: () -> Unit,
     onTasks: () -> Unit,
-    onQuotaRefresh: () -> Unit,
 ) {
     var otherWays by rememberSaveable { mutableStateOf(false) }
     val unfinished = state.tasks.filter { it.status in setOf("queued", "running", "paused") }
@@ -70,46 +69,40 @@ internal fun HomeScreen(
                             }
                         }
                         Text(
-                            "网页下载 ZIP，在浏览器下载记录中分享给本助手，再选聊天整理。",
+                            "导入聊天记录，整理后就能带到 DeepSeek 接着聊。",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Button(
-                            onClick = onGetRecords,
+                            onClick = onImport,
                             enabled = !state.busy,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Icon(Icons.Outlined.MenuBook, null, Modifier.size(18.dp))
+                            Icon(Icons.Outlined.FileUpload, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(7.dp))
-                            Text("查看下载与分享教程")
+                            Text("导入聊天文件")
                         }
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            TextButton(onClick = onImport, enabled = !state.busy) {
-                                Text("手动选择 ZIP")
+                        ActionRow {
+                            TextButton(onClick = onGetRecords, enabled = !state.busy) {
+                                Icon(Icons.Outlined.MenuBook, null, Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("如何下载聊天记录")
                             }
-                            Text(
-                                "找不到分享入口时使用，不用解压。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            TextButton(onClick = { otherWays = !otherWays }) {
+                                Text(if (otherWays) "收起其他方式" else "其他方式")
+                            }
+                        }
+                        Text("支持 ZIP、JSON，也可从浏览器直接分享过来。ZIP 不用解压。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (otherWays) ActionRow {
+                            TextButton(onClick = onPaste, enabled = !state.busy) { Text("粘贴聊天内容") }
+                            TextButton(onClick = onDemo, enabled = !state.busy) { Text("体验示例") }
                         }
                     }
                 }
             }
         }
-        item {
-            TextButton(onClick = { otherWays = !otherWays }) {
-                Icon(if (otherWays) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)
-                Text("其他方式")
-            }
-            if (otherWays)
-                ActionRow {
-                    TextButton(onClick = onPaste, enabled = !state.busy) { Text("粘贴聊天内容") }
-                    TextButton(onClick = onDemo, enabled = !state.busy) { Text("体验示例") }
-                    TextButton(onClick = onImport, enabled = !state.busy) { Text("导入 JSON 文件") }
-                }
-        }
-        if (state.settings.mode == "companion") item { FreeQuotaCard(state, onQuotaRefresh) }
         if (unfinished.isNotEmpty()) {
             item { SectionTitle("上次还没整理完") }
             items(unfinished.take(2), key = { "task-${it.id}" }) { task ->

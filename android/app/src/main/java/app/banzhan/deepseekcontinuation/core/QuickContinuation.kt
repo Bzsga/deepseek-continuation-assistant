@@ -31,8 +31,7 @@ object QuickContinuation {
         } else archive.entries
         val local = archive.copy(entries = entries, generationMode = "summary")
         val result = ContinuityLogic.export(local, conversations, maxCharacters = 12000)
-        return result.copy(text = "【快速接续 · 本机准备】\n" +
-            "以下只包含可用档案与本次选定范围中的近期原话，未进行新的智能整理，也不代表完整历史。" +
-            "未附带的内容不能据此认定没有发生；需要关键前提时简短核实。\n\n" + result.text)
+        return result.copy(text = "【这次先带来的内容】\n" +
+            "本次未进行新的智能整理，只带已有记忆和所选范围中的近期原话，不代表完整历史。\n\n" + result.text)
     }
 }

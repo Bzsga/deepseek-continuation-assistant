@@ -31,19 +31,15 @@ class InteractionStyleTest {
             assertTrue(text.indexOf(source.continuity.interactionNotes) < text.indexOf(cue.text))
             assertTrue(text.indexOf(cue.text) < text.indexOf(style.text))
         }
-        assertTrue(text.contains("【明确修正与变化】"))
-        assertTrue(text.indexOf("【明确修正与变化】") < text.indexOf(correction.text))
-        assertTrue(text.contains("明确修正 · 接下来要聊的事 · 用户陈述 · 来源角色：用户 · 第3条"))
+        assertTrue(text.contains("【我后来补充和纠正过的地方】"))
+        assertTrue(text.indexOf("【我后来补充和纠正过的地方】") < text.indexOf(correction.text))
+        assertTrue(text.contains("明确修正 · 我说过的话 · 原话第3条（我）"))
         source.entries.forEach { assertEquals(1, Regex(Regex.escape(it.text)).findAll(text).count()) }
         assertEquals(1, plan.responseStyleCount)
-        assertTrue(text.contains("回应方式观察（非用户要求）"))
-        assertTrue(text.contains("来源角色：助手 · 第2、4条"))
-        assertTrue(text.contains("与历史观察不同时以此为准"))
-        assertTrue(text.contains("事实修正不自动变成沟通偏好"))
-        assertTrue(text.contains("观察不等于用户偏好、助手身份或关系承诺"))
-        assertTrue(text.contains("不要从我的沉默推断偏好"))
-        assertTrue(text.contains("不沿用历史错误、危险建议、排他或过度承诺"))
-        assertTrue(text.contains("优先回应我接下来想说的内容"))
+        assertTrue(text.contains("回应方式（情境观察）"))
+        assertTrue(text.contains("原话第2、4条（你）"))
+        assertTrue(text.contains("以我现在的补充和后来的明确修订为准"))
+        assertTrue(text.endsWith(source.continuity.nextMessage + "\n"))
     }
 
     @Test fun styleNeedsTwoDistinctAssistantSourcesAndAnAllowedKind() {
@@ -58,9 +54,9 @@ class InteractionStyleTest {
         val valid = style("valid", "两条助手原话支持的具体做法。", "a0", "a1").copy(kind = EntryKind.UNCONFIRMED)
         val plan = ContinuityLogic.buildPlan(archive(conversation, invalid + valid), listOf(conversation))
         assertEquals(1, plan.responseStyleCount)
-        assertTrue(plan.export.text.indexOf(valid.text) < plan.export.text.indexOf("【必要记忆 · 历史资料】"))
+        assertTrue(plan.export.text.indexOf(valid.text) < plan.export.text.indexOf("【之前聊过的背景】"))
         invalid.forEach {
-            assertTrue(plan.export.text.indexOf(it.text) > plan.export.text.indexOf("【必要记忆 · 历史资料】"))
+            assertTrue(plan.export.text.indexOf(it.text) > plan.export.text.indexOf("【之前聊过的背景】"))
             assertEquals(1, Regex(Regex.escape(it.text)).findAll(plan.export.text).count())
         }
     }
@@ -77,7 +73,7 @@ class InteractionStyleTest {
         val plan = ContinuityLogic.buildPlan(source, listOf(conversation))
         assertEquals(1, plan.responseStyleCount)
         assertFalse(plan.export.text.contains(valid.text))
-        assertFalse(plan.export.text.contains("【观察到的助手回应方式】"))
+        assertFalse(plan.export.text.contains("【你当时的回应方式】"))
         assertTrue(plan.export.text.contains(invalid.text))
         assertTrue(plan.notices.any { it.contains("已关闭自动回应方式") && it.contains("条目仍保留") })
         assertEquals(snapshot, snapshotJson.encodeToString(source))
@@ -96,13 +92,13 @@ class InteractionStyleTest {
         val source = archive(conversation, styles + duplicate)
         val plan = ContinuityLogic.buildPlan(source, listOf(conversation))
         assertEquals(7, plan.responseStyleCount)
-        assertEquals(4, Regex("回应方式观察（非用户要求）").findAll(plan.export.text).count())
+        assertEquals(4, Regex("回应方式（情境观察）").findAll(plan.export.text).count())
         (0..1).forEach { assertFalse(plan.export.text.contains(styles[it].text)) }
         (2..5).forEach { assertEquals(1, Regex(Regex.escape(styles[it].text)).findAll(plan.export.text).count()) }
         assertTrue((2..5).map { plan.export.text.indexOf(styles[it].text) }.zipWithNext().all { (a, b) -> a < b })
         assertTrue(plan.notices.any { it.contains("4 条代表回应方式") && it.contains("其余 3 条") })
         assertEquals(styles + duplicate, source.entries)
-        assertFalse(plan.export.text.contains("【必要记忆 · 历史资料】"))
+        assertFalse(plan.export.text.contains("【之前聊过的背景】"))
     }
 
     @Test fun stylesCannotCrossBranchesOrUseEditedDeletedOrUnselectedSources() {

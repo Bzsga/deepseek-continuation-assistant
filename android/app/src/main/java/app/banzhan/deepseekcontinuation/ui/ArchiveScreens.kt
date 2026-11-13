@@ -115,9 +115,6 @@ internal fun ArchiveScreen(
             }
             ActionRow {
                 TextButton(onClick = onRepair) { Text("没接上？调整一下") }
-                TextButton(onClick = { run { conflicts = controller.conflicts(archive.id) } }) {
-                    Text("核对冲突")
-                }
                 continuingPoliticalTask?.let { pending ->
                     TextButton(onClick = onPoliticalExport, enabled = !state.busy) {
                         Text(if (pending.canResume) "继续温和版检查" else "查看温和版进度")
@@ -144,6 +141,12 @@ internal fun ArchiveScreen(
                     controller.saveContinuitySettings(archive.id, settings)
                 }
                 ActionRow {
+                    TextButton(onClick = { run { conflicts = controller.conflicts(archive.id) } }) {
+                        Text("核对冲突")
+                    }
+                    if (archive.background.isBlank()) {
+                        TextButton(onClick = { editBackground = true }) { Text("补充背景") }
+                    }
                     if (continuingPoliticalTask == null && archive.generationMode == "summary" &&
                         (entries.any { it.text.isNotBlank() } || archive.background.isNotBlank())) {
                         OutlinedButton(onClick = onPoliticalExport, enabled = !state.busy) { Text("生成温和版") }
@@ -165,7 +168,7 @@ internal fun ArchiveScreen(
                 }
             }
         }
-        item {
+        if (archive.background.isNotBlank()) item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
@@ -175,7 +178,7 @@ internal fun ArchiveScreen(
                 ) {
                     Row {
                         Text("补充背景", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                        IconButton(onClick = { editBackground = true }, Modifier.size(28.dp)) {
+                        IconButton(onClick = { editBackground = true }) {
                             Icon(Icons.Outlined.Edit, "编辑背景", Modifier.size(18.dp))
                         }
                     }
@@ -216,40 +219,17 @@ internal fun ArchiveScreen(
                     SelectionContainer {
                         Text(entry.text, style = MaterialTheme.typography.bodyMedium)
                     }
-                    ActionRow {
-                        TextButton(onClick = { editEntry = entry }) { Text("编辑") }
-                        TextButton(
-                            onClick = {
-                                run {
-                                    controller.saveEntry(
-                                        archive.id,
-                                        entry.copy(pinned = !entry.pinned),
-                                    )
-                                }
-                            }
-                        ) {
-                            Text(if (entry.pinned) "取消固定" else "固定")
-                        }
-                        TextButton(onClick = { sourceEntry = entry }) {
-                            Text("来源 ${entry.sourceIds.size}")
-                        }
-                        TextButton(
-                            onClick = {
-                                run {
-                                    controller.saveEntry(
-                                        archive.id,
-                                        entry.copy(deleted = true, edited = true),
-                                    )
-                                }
-                            }
-                        ) {
-                            Text("删除", color = MaterialTheme.colorScheme.error)
-                        }
-                    }
+                    ArchiveEntryActions(
+                        entry = entry,
+                        onEdit = { editEntry = entry },
+                        onPin = { run { controller.saveEntry(archive.id, entry.copy(pinned = !entry.pinned)) } },
+                        onSource = { sourceEntry = entry },
+                        onDelete = { run { controller.saveEntry(archive.id, entry.copy(deleted = true, edited = true)) } },
+                    )
                 }
             }
         }
-        item {
+        if (showMoreActions) item {
             SectionTitle("关联的对话")
             Spacer(Modifier.height(8.dp))
             state.conversations
@@ -538,6 +518,41 @@ private fun ConflictEntryPreview(entry: ArchiveEntry) {
                 TextButton(onClick = { previewLimit = (previewLimit + 8000).coerceAtMost(entry.text.length) }) {
                     Text("继续查看")
                 }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun ArchiveEntryActions(
+    entry: ArchiveEntry,
+    onEdit: () -> Unit,
+    onPin: () -> Unit,
+    onSource: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    var more by remember(entry.id) { mutableStateOf(false) }
+    ActionRow {
+        TextButton(onClick = onEdit) { Text("编辑") }
+        Box {
+            TextButton(onClick = { more = true }) {
+                Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("条目操作")
+            }
+            DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (entry.pinned) "取消固定" else "固定") },
+                    onClick = { more = false; onPin() },
+                )
+                DropdownMenuItem(
+                    text = { Text("来源 ${entry.sourceIds.size}") },
+                    onClick = { more = false; onSource() },
+                )
+                DropdownMenuItem(
+                    text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                    onClick = { more = false; onDelete() },
+                )
             }
         }
     }

@@ -41,7 +41,7 @@ internal fun ContinuitySetupCard(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        TextButton(onClick = { editing = true }) { Text("调整（可选）") }
+        TextButton(onClick = { editing = true }) { Text("续聊设置") }
     }
     if (editing)
         ContinuityEditor(archive, conversations, { editing = false }, onSave)

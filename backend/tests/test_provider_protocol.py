@@ -176,7 +176,7 @@ def test_eight_long_sources_use_alias_wire_and_restore_original_ids(settings, me
     assert all(item["id"] not in json.dumps(request) for item in messages)
     assert [(item["role"], item["content"]) for item in wire] == [(item["role"], item["content"]) for item in messages]
     assert snapshot["input_bound"] == sum(len(item["content"].encode()) for item in request["messages"]) + 1024
-    assert snapshot["protocol_version"] == 9
+    assert snapshot["protocol_version"] == 10
     assert result.entries[0]["sourceIds"] == [messages[0]["id"]]
     assert result.entries[1]["sourceIds"] == [messages[1]["id"]]
     assert result.entries[2]["sourceIds"] == [messages[6]["id"], messages[7]["id"]]
@@ -194,8 +194,9 @@ def test_eight_long_sources_use_alias_wire_and_restore_original_ids(settings, me
     (6, True, 6151, "657ae30ec7d3d78c17b90148deaa56aea38050a7e64f3f26ebb3b2a0c54cc2a6"),
     (7, True, 6722, "7b5ae58341399ab24b0c5f6eb69072a3b6403d0c6fb82d0bfe737fc0e085e55f"),
     (8, True, 7849, "035df896fb79cd6c85ad9871f53c056eaf2b2728bc20e5b9aca45fb9f49bf901"),
+    (9, True, 8805, "7e8efa1f829eb6bd7bfaf2d6b1b3d2e393dd1602454585f6e71417f4de66665e"),
 ])
-def test_frozen_v2_through_v8_snapshot_keeps_its_prompt_and_bound(settings, monkeypatch, version, explicit_version, bound, digest):
+def test_frozen_v2_through_v9_snapshot_keeps_its_prompt_and_bound(settings, monkeypatch, version, explicit_version, bound, digest):
     sources = [{"id": "legacy-source", "role": "user", "content": "合成历史资料。"}]
     snapshot, _ = snapshot_for(settings, sources)
     assert snapshot["input_bound"] > bound
@@ -248,7 +249,7 @@ def test_v8_soft_output_budget_is_bounded_without_changing_output_allowance(sett
     prompt = provider_messages(source, tokens)
     assert f"最多输出 {count} 项" in prompt[0]["content"]
     assert f"不超过 {characters} 字" in prompt[0]["content"]
-    assert snapshot["output_bound"] == tokens and snapshot["protocol_version"] == 9
+    assert snapshot["output_bound"] == tokens and snapshot["protocol_version"] == 10
 
 
 @pytest.mark.parametrize("wrap,layout", [
@@ -372,7 +373,7 @@ def test_compatibility_keeps_unknown_usage_semantics_and_rejects_schema_copy(set
     assert len(requests) == 2  # One request for each explicitly invoked synthetic job.
 
 
-@pytest.mark.parametrize("version", [1, 10, "8", None, True, 2.0])
+@pytest.mark.parametrize("version", [1, 11, "8", None, True, 2.0])
 def test_unknown_protocol_version_is_rejected_before_network(settings, messages, monkeypatch, version):
     snapshot, _ = snapshot_for(settings, messages)
     snapshot["protocol_version"] = version

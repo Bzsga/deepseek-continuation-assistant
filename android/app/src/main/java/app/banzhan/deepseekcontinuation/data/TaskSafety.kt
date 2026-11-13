@@ -46,7 +46,8 @@ internal fun settingsWithServerBudget(settings: ServiceSettings, quota: Companio
 /** Older companion services keep their compatible request shape until the service is upgraded. */
 internal fun organizationPromptVersion(settings: ServiceSettings, quota: CompanionQuota? = null): String =
     when {
-        settings.mode == "byok" || (quota?.organizationProtocolVersion ?: 0) >= 9 -> SummaryProtocol.PROMPT_VERSION
+        settings.mode == "byok" || (quota?.organizationProtocolVersion ?: 0) >= 10 -> SummaryProtocol.PROMPT_VERSION
+        (quota?.organizationProtocolVersion ?: 0) >= 9 -> SummaryProtocol.DISCUSSION_PROGRESS_PROMPT_VERSION
         (quota?.organizationProtocolVersion ?: 0) >= 8 -> SummaryProtocol.LONG_TEXT_PROMPT_VERSION
         else -> SummaryProtocol.RESPONSE_STYLE_PROMPT_VERSION
     }
