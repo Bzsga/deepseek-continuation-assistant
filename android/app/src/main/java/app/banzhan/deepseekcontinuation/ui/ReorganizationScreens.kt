@@ -30,6 +30,7 @@ internal fun ArchiveReorganizationActions(
     busy: Boolean,
     onReorganize: () -> Unit,
     onOpenRecord: (String) -> Unit,
+    showStartAction: Boolean = true,
 ) {
     val rebuilt = remember(archive.id, archives, tasks) {
         preferredRebuiltArchive(archive.id, archives, tasks)
@@ -54,7 +55,7 @@ internal fun ArchiveReorganizationActions(
                 })
             }
         }
-        if (rebuiltTask?.status !in setOf("queued", "running", "paused")) {
+        if (showStartAction && rebuiltTask?.status !in setOf("queued", "running", "paused")) {
             TextButton(onClick = onReorganize, enabled = !busy) { Text("重新整理") }
         }
     }

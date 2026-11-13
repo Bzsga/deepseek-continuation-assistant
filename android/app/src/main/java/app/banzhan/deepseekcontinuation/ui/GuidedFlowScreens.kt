@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -654,7 +655,8 @@ internal fun ContinuationResultScreen(
     }
     var previewLimit by rememberSaveable(archive.id) { mutableIntStateOf(8000) }
     var showPreview by rememberSaveable(archive.id) { mutableStateOf(true) }
-    var showMoreActions by rememberSaveable(archive.id) { mutableStateOf(false) }
+    var showTools by rememberSaveable(archive.id) { mutableStateOf(false) }
+    var editingContinuity by rememberSaveable(archive.id) { mutableStateOf(false) }
     val text = export?.getOrNull()?.text
     val unfinished = task != null && task.status != "completed"
     val rebuiltCompleted = archive.rebuiltFromArchiveId != null && task?.status == "completed"
@@ -663,144 +665,147 @@ internal fun ContinuationResultScreen(
     val pendingOrganization = tasks.firstOrNull {
         it.archiveId == archive.id && it.status in setOf("queued", "running", "paused")
     } ?: task?.takeIf { it.status in setOf("queued", "running", "paused") }
+
+    val rebuilt = remember(archive.id, archives, tasks) { preferredRebuiltArchive(archive.id, archives, tasks) }
+    val rebuiltTask = tasks.firstOrNull { it.archiveId == rebuilt?.id && it.status != "completed" }
+    val canReorganize = pendingOrganization == null && rebuiltTask?.status !in setOf("queued", "running", "paused")
     LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        Modifier.fillMaxSize().testTag("result-list"),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { FlowSteps(3) }
         item {
-            SectionTitle(
-                when {
-                    export == null -> "正在准备续聊内容"
-                    unfinished -> "已保存的部分内容"
-                    rebuiltCompleted -> "重新整理已完成"
-                    archive.generationMode == "original" -> "原文准备好了"
-                    archive.generationMode == "summary" && text != null -> "整理好了，可以接着聊"
-                    archive.generationMode == "summary" -> "这次没有提取到内容"
-                    else -> "已保存的续聊内容"
-                },
-                "${archive.title} · 已自动保存在本机",
-            )
-        }
-        if (unfinished) item { NoticeCard("整理尚未完成，下面是目前已保存的内容。") }
-        if (rebuiltCompleted && text != null) item {
-            Text("已保留个人设置和手动内容。", style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        if (export == null) {
-            item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-        } else if (text == null) {
-            item {
-                NoticeCard(
-                    if (rebuiltCompleted) "重新整理已完成，已保留你的修改与删除；需要时到详细内容核对新建议。"
-                    else if (archive.generationMode == "summary") "没有提取到可续聊的内容，可以返回准备页改用「先带走原文」。"
-                    else export?.exceptionOrNull()?.message ?: "还没有可导出的内容。"
-                )
-            }
-            item {
-                if (rebuiltCompleted) Button(onClick = onDetails) { Text("查看详细内容与新建议") }
-                else Button(onClick = onPrepare) { Text("返回准备页") }
-                if (!rebuiltCompleted) {
-                    TextButton(onClick = onDetails) { Text("查看与修改详细内容") }
-                }
-                ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
-            }
-        } else {
-            item {
-                if (archive.generationMode == "original")
-                    Text(
-                        "这是所选范围的原文，长度没有缩短。",
+            Surface(shape = MaterialTheme.shapes.medium) {
+                Column(Modifier.fillMaxWidth().padding(18.dp).testTag("result-primary"),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Icon(if (unfinished) Icons.Outlined.History else Icons.Outlined.CheckCircleOutline,
+                            null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
+                        Text(
+                            when {
+                                export == null -> "正在准备续聊内容"
+                                unfinished -> "已保存的部分内容"
+                                rebuiltCompleted -> "重新整理已完成"
+                                archive.generationMode == "original" -> "原文准备好了"
+                                archive.generationMode == "summary" && text != null -> "整理好了，可以接着聊"
+                                archive.generationMode == "summary" -> "这次没有提取到内容"
+                                else -> "已保存的续聊内容"
+                            }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    Text(archive.title + if (archive.generationMode == "original") " · 原文未压缩 · 已存本机" else " · 已存本机",
+                        style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (unfinished) NoticeCard("整理尚未完成，下面是目前已保存的内容。")
+                    if (rebuiltCompleted && text != null) Text("已保留个人设置和手动内容。",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                if (large)
-                    Text(
-                        "内容较长，建议保存为续聊文件后，在 DeepSeek 新对话中添加文件。",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                ActionRow {
-                    if (large) Button(onClick = { onSave(text) }) { Text("保存续聊文件") }
-                    else
-                        Button(onClick = { onCopyAndOpen(text) }) {
-                            Icon(Icons.Outlined.ContentCopy, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("复制并打开 DeepSeek")
-                        }
-                    if (large) OutlinedButton(onClick = onOpenDeepSeek) { Text("打开 DeepSeek") }
-                }
-                Text(
-                    "新建对话 → 粘贴或添加文件 → 发送",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Blue,
-                )
-                if ((export?.getOrNull()?.omittedCount ?: 0) > 0) {
-                    Text("已优先携带互动与近期内容，${export?.getOrNull()?.omittedCount} 条自动内容仍保留在原档案。",
-                        style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = onDetails) { Text("查看完整档案") }
-                }
-                pendingOrganization?.let { pending ->
-                    TextButton(onClick = { onOpenRecord(archive.id) }, enabled = !busy) {
-                        Text(if (pending.status == "paused") "继续上次整理" else "查看整理进度")
-                    }
-                }
-                if (hasReorganizationNavigation) {
-                    ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
-                }
-                ActionRow {
-                onAddRecent?.let { add -> TextButton(onClick = add) { Text("补入最近聊天") } }
-                TextButton(onClick = onRepair) { Text("没接上？调整一下") }
-                TextButton(onClick = { showMoreActions = !showMoreActions }) {
-                    Icon(if (showMoreActions) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        null, Modifier.size(18.dp))
-                    Text(if (showMoreActions) "收起更多选项" else "调整与更多")
-                }
-                }
-                if (showMoreActions) {
-                    ContinuitySetupCard(archive, conversations, onSaveContinuity)
-                    ActionRow {
-                        if (!large) OutlinedButton(onClick = { onSave(text) }) { Text("保存续聊文件") }
-                        TextButton(onClick = onDetails) { Text("查看与修改详细内容") }
-                    }
-                    if (archive.generationMode == "summary") {
-                        SensitiveContentAction(onPoliticalExport, enabled = !busy)
-                    }
-                    if (!hasReorganizationNavigation && pendingOrganization == null) {
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (export == null) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                    } else if (text == null) {
+                        NoticeCard(
+                            if (rebuiltCompleted) "重新整理已完成，已保留你的修改与删除；需要时到详细内容核对新建议。"
+                            else if (archive.generationMode == "summary") "没有提取到可续聊的内容，可以返回准备页改用「先带走原文」。"
+                            else export?.exceptionOrNull()?.message ?: "还没有可导出的内容。"
+                        )
+                        if (rebuiltCompleted) Button(onClick = onDetails) { Text("查看详细内容与新建议") }
+                        else Button(onClick = onPrepare) { Text("返回准备页") }
+                        if (!rebuiltCompleted) TextButton(onClick = onDetails) { Text("查看与修改详细内容") }
                         ArchiveReorganizationActions(archive, archives, tasks, busy, onReorganize, onOpenRecord)
+                    } else {
+                        if (large) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { onSave(text) }, modifier = Modifier.heightIn(min = 48.dp),
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp)) {
+                                    Icon(Icons.Outlined.SaveAlt, null, Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("保存文件")
+                                }
+                                OutlinedButton(onClick = onOpenDeepSeek, modifier = Modifier.heightIn(min = 48.dp),
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp)) {
+                                    Text("打开 DeepSeek")
+                                }
+                            }
+                            Text("保存后，在新对话中添加文件。", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            Button(onClick = { onCopyAndOpen(text) },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                Icon(Icons.Outlined.ContentCopy, null, Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("复制并打开 DeepSeek")
+                            }
+                            Text("新建对话，粘贴后发送。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if ((export?.getOrNull()?.omittedCount ?: 0) > 0) {
+                            Text("已优先携带互动与近期内容，${export?.getOrNull()?.omittedCount} 条自动内容仍保留在原档案。",
+                                style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = onDetails) { Text("查看完整档案") }
+                        }
+                        pendingOrganization?.let { pending ->
+                            TextButton(onClick = { onOpenRecord(archive.id) }, enabled = !busy) {
+                                Text(if (pending.status == "paused") "继续上次整理" else "查看整理进度")
+                            }
+                        }
+                        if (hasReorganizationNavigation) ArchiveReorganizationActions(
+                            archive, archives, tasks, busy, onReorganize, onOpenRecord, showStartAction = false,
+                        )
+                    }
+                }
+            }
+        }
+        if (text != null) {
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    onAddRecent?.let { add ->
+                        TextButton(onClick = add, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)) {
+                            Text("补入最近聊天")
+                        }
+                    }
+                    TextButton(onClick = onRepair,
+                        modifier = if (onAddRecent != null) Modifier.weight(1f).heightIn(min = 48.dp)
+                            else Modifier.heightIn(min = 48.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)) {
+                        Text("没接上？")
                     }
                 }
             }
             item {
-                TextButton(onClick = { showPreview = !showPreview }) {
-                    Icon(if (showPreview) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        null, Modifier.size(18.dp))
-                    Text(if (showPreview) "收起续聊内容" else "查看续聊内容（${text.length} 字符）")
-                }
-                if (showPreview)
-                Surface(shape = MaterialTheme.shapes.medium) {
-                    Column(
-                        Modifier.fillMaxWidth().padding(18.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Text("当前续聊版本预览", fontWeight = FontWeight.SemiBold)
-                        SelectionContainer {
-                            Text(
-                                text.take(previewLimit),
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
+                Surface(shape = MaterialTheme.shapes.medium, modifier = Modifier.testTag("result-preview")) {
+                    Column(Modifier.fillMaxWidth().padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("续聊内容", style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold)
+                                Text("${text.length} 字符", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            TextButton(onClick = { showTools = true }, modifier = Modifier.testTag("result-tool-trigger"),
+                                contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                Icon(Icons.Outlined.Tune, null, Modifier.size(17.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("工具")
+                            }
+                            IconButton(onClick = { showPreview = !showPreview }) {
+                                Icon(if (showPreview) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                    if (showPreview) "收起续聊内容" else "展开续聊内容")
+                            }
                         }
-                        if (text.length > previewLimit) {
-                            Text(
-                                "当前预览前 $previewLimit 字符，复制和保存包含此续聊版本的全部 ${text.length} 字符。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            TextButton(
-                                onClick = {
-                                    previewLimit = (previewLimit + 8000).coerceAtMost(text.length)
+                        if (showPreview) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            SelectionContainer { Text(text.take(previewLimit), style = MaterialTheme.typography.bodyMedium) }
+                            if (text.length > previewLimit) {
+                                Text("预览前 $previewLimit 字符；复制和保存包含全部 ${text.length} 字符。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                TextButton(onClick = { previewLimit = (previewLimit + 8000).coerceAtMost(text.length) }) {
+                                    Text("继续查看")
                                 }
-                            ) {
-                                Text("继续查看")
                             }
                         }
                     }
@@ -808,4 +813,15 @@ internal fun ContinuationResultScreen(
             }
         }
     }
+    if (showTools && text != null) ResultToolsSheet(
+        large = large, summary = archive.generationMode == "summary", canReorganize = canReorganize, busy = busy,
+        onDismiss = { showTools = false },
+        onSettings = { showTools = false; editingContinuity = true },
+        onSave = { showTools = false; onSave(text) },
+        onDetails = { showTools = false; onDetails() },
+        onPoliticalExport = { showTools = false; onPoliticalExport() },
+        onReorganize = { showTools = false; onReorganize() },
+    )
+    if (editingContinuity) ContinuityEditor(archive, conversations,
+        { editingContinuity = false }, onSaveContinuity)
 }

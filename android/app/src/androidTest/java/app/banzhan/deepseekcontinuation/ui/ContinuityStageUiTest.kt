@@ -144,7 +144,7 @@ class ContinuityStageUiTest {
         compose.waitUntil(10_000) {
             compose.onAllNodes(hasText("复制并打开 DeepSeek")).fetchSemanticsNodes().isNotEmpty()
         }
-        scrollToLazyText("没接上？调整一下").performClick()
+        scrollToLazyText("没接上？").performClick()
         compose.onNodeWithText("没接上，调整一下").assertIsDisplayed()
         compose.onNodeWithText("生成修正内容").performClick()
         awaitCopyButton()

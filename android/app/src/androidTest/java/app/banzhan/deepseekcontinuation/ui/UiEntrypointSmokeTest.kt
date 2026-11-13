@@ -1,6 +1,23 @@
 package app.banzhan.deepseekcontinuation.ui
 
 import android.graphics.Bitmap
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Checklist
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -11,6 +28,7 @@ import app.banzhan.deepseekcontinuation.data.OrganizationTask
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.io.File
+import kotlin.math.abs
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -40,12 +58,13 @@ class UiEntrypointSmokeTest {
             }
         }
         awaitText("复制并打开 DeepSeek")
+        compose.onNodeWithTag("result-primary").assertIsDisplayed()
         compose.onNodeWithText("打开 DeepSeek").assertDoesNotExist()
         compose.onNodeWithText("去除敏感内容").assertDoesNotExist()
         compose.onNodeWithText("重新整理").assertDoesNotExist()
         compose.onNodeWithText("查看与修改详细内容").assertDoesNotExist()
         screenshot("result-short-primary-actions.png")
-        compose.onNodeWithText("复制并打开 DeepSeek").performScrollTo().assertIsDisplayed().performClick()
+        resultText("复制并打开 DeepSeek").assertIsDisplayed().performClick()
         compose.onNodeWithText("保存续聊文件").assertDoesNotExist()
         compose.waitForIdle()
         assertEquals(ArchiveLogic.continuationExport(archive, emptyList()).text, copied.get())
@@ -54,31 +73,32 @@ class UiEntrypointSmokeTest {
         assertEquals(0, political.get())
         assertEquals(0, reorganized.get())
 
-        compose.onNodeWithText("调整与更多").performScrollTo().performClick()
+        openTools()
         compose.onNodeWithText("续聊设置").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("保存续聊文件").performScrollTo().assertIsDisplayed().performClick()
-        compose.waitForIdle()
+        compose.onNodeWithText("保存续聊文件").performScrollTo().performClick()
+        awaitToolsClosed()
         assertEquals(copied.get(), saved.get())
-        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
-        screenshot("result-short-expanded-options.png")
+        openTools()
+        screenshot("result-short-tools-sheet.png")
         compose.onNodeWithText("去除敏感内容").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(SENSITIVE_CONTENT_NOTE).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("去除敏感内容").performScrollTo().performClick()
+        awaitToolsClosed()
+        openTools()
         compose.onNodeWithText("查看与修改详细内容").performScrollTo().performClick()
+        awaitToolsClosed()
+        openTools()
         compose.onNodeWithText("重新整理").performScrollTo().performClick()
-        compose.waitForIdle()
+        awaitToolsClosed()
         assertEquals(1, political.get())
         assertEquals(1, details.get())
         assertEquals(1, reorganized.get())
-        compose.onNodeWithText("收起更多选项").performScrollTo().performClick()
         compose.onNodeWithText("去除敏感内容").assertDoesNotExist()
-        compose.onNodeWithText("复制并打开 DeepSeek").performScrollTo().assertIsDisplayed()
-        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("下次继续讨论这段虚构故事。", substring = true))
-        compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).assertIsDisplayed()
-        compose.onNodeWithText("收起续聊内容").performScrollTo().performClick()
+        resultText("下次继续讨论这段虚构故事。", substring = true).assertIsDisplayed()
+        compose.onNodeWithContentDescription("收起续聊内容").performScrollTo().performClick()
         compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).assertDoesNotExist()
-        compose.onNodeWithText("查看续聊内容（", substring = true).performScrollTo().performClick()
-        compose.onNodeWithText("下次继续讨论这段虚构故事。", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithContentDescription("展开续聊内容").performClick()
+        resultText("下次继续讨论这段虚构故事。", substring = true).assertIsDisplayed()
     }
 
     @Test fun longOriginalKeepsFileAndOpenActionsWithRecoveryVisible() {
@@ -93,14 +113,16 @@ class UiEntrypointSmokeTest {
         val copies = AtomicInteger()
         compose.setContent {
             ContinuationTheme {
+                ResultTestFrame {
                 ContinuationResultScreen(archive, null, emptyList(), {}, { copies.incrementAndGet() }, saved::set,
                     { openedOnly.incrementAndGet() }, {}, {}, archives = listOf(archive, child), tasks = listOf(pending),
                     onOpenRecord = resumed::set)
+                }
             }
         }
-        awaitText("保存续聊文件")
+        awaitText("保存文件")
         compose.onNodeWithText("复制并打开 DeepSeek").assertDoesNotExist()
-        compose.onNodeWithText("保存续聊文件").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithText("保存文件").performScrollTo().assertIsDisplayed().performClick()
         compose.onNodeWithText("打开 DeepSeek").performScrollTo().assertIsDisplayed().performClick()
         compose.onNodeWithText("继续上次整理").performScrollTo().assertIsDisplayed().performClick()
         compose.waitForIdle()
@@ -109,14 +131,19 @@ class UiEntrypointSmokeTest {
         assertEquals(1, openedOnly.get())
         assertEquals(child.id, resumed.get())
         assertEquals(0, copies.get())
-        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
-        compose.onNodeWithText("保存续聊文件").assertIsDisplayed()
+        compose.onNodeWithTag("result-list").performScrollToIndex(0)
+        compose.onNodeWithText("保存文件").assertIsDisplayed()
         compose.onNodeWithText("打开 DeepSeek").assertIsDisplayed()
         screenshot("result-long-file-and-recovery.png")
-        compose.onNodeWithText("调整与更多").performScrollTo().performClick()
+        openTools()
         compose.onNodeWithText("去除敏感内容").assertDoesNotExist()
         compose.onNodeWithText("重新整理").assertDoesNotExist()
+        compose.onNode(hasText("保存续聊文件") and hasAnyAncestor(hasTestTag("result-tools-sheet")))
+            .assertDoesNotExist()
         compose.onNodeWithText("查看与修改详细内容").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("result-tools-close").performClick()
+        awaitToolsClosed()
+        resultText("继续上次整理").assertIsEnabled()
     }
 
     @Test fun defaultExpandedLongPreviewCanRevealTheRestWithoutChangingCopiedText() {
@@ -131,17 +158,69 @@ class UiEntrypointSmokeTest {
             }
         }
         awaitText("复制并打开 DeepSeek")
-        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("当前续聊版本预览"))
-        compose.onNodeWithText("当前续聊版本预览").assertIsDisplayed()
+        resultText("续聊内容").assertIsDisplayed()
         compose.onNodeWithText("长预览末尾标记", substring = true).assertDoesNotExist()
         compose.onNodeWithText("继续查看").performScrollTo().performClick()
         compose.onNodeWithText("长预览末尾标记", substring = true).performScrollTo().assertIsDisplayed()
-        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("复制并打开 DeepSeek"))
-        compose.onNodeWithText("复制并打开 DeepSeek").performScrollTo().performClick()
+        resultText("复制并打开 DeepSeek").performClick()
         compose.runOnIdle {
             assertEquals(ArchiveLogic.continuationExport(archive, emptyList()).text, copied.get())
             assertTrue(requireNotNull(copied.get()).contains("长预览末尾标记"))
         }
+    }
+
+    @Test fun openingToolsKeepsPreviewInPlaceAndBothExportsKeepTheCompleteText() {
+        val archive = Archive("stable-result-layout", "合成排版检查", emptyList(), listOf(
+            ArchiveEntry("layout-entry", EntryCategory.RECENT,
+                "几何检查的合成资料。\n".repeat(900) + "完整文本尾标记", edited = true),
+        ), generationMode = "summary")
+        val copied = AtomicReference<String?>(null)
+        val saved = AtomicReference<String?>(null)
+        val extraActions = AtomicInteger()
+        compose.setContent {
+            ContinuationTheme {
+                ResultTestFrame {
+                ContinuationResultScreen(archive, null, emptyList(), {}, copied::set, saved::set,
+                    {}, {}, {}, onAddRecent = { extraActions.incrementAndGet() })
+                }
+            }
+        }
+        awaitText("复制并打开 DeepSeek")
+        compose.onNodeWithTag("result-list").performScrollToIndex(0)
+        compose.onNodeWithTag("result-tool-trigger").assertIsDisplayed()
+        compose.onNodeWithContentDescription("收起续聊内容").assertIsDisplayed()
+        val previewBefore = compose.onNodeWithTag("result-preview").fetchSemanticsNode().boundsInRoot
+        val primaryBefore = compose.onNodeWithTag("result-primary").fetchSemanticsNode().boundsInRoot
+        val density = InstrumentationRegistry.getInstrumentation().targetContext.resources.displayMetrics.density
+        assertTrue("Preview must follow the primary actions", previewBefore.top >= primaryBefore.bottom)
+        assertTrue("Secondary tools must not occupy the page", previewBefore.top - primaryBefore.bottom <= 100f * density)
+        compose.onNodeWithText("完整文本尾标记", substring = true).assertDoesNotExist()
+        screenshot("result-preview-before-tools.png")
+
+        compose.onNodeWithTag("result-tool-trigger").performClick()
+        compose.onNodeWithTag("result-tools-sheet").assertIsDisplayed()
+        compose.onNodeWithText("续聊工具").assertIsDisplayed()
+        compose.onNodeWithTag("result-tools-close").performClick()
+        awaitToolsClosed()
+        val previewAfter = compose.onNodeWithTag("result-preview").fetchSemanticsNode().boundsInRoot
+        val primaryAfter = compose.onNodeWithTag("result-primary").fetchSemanticsNode().boundsInRoot
+        assertTrue("Opening tools must not move the preview", abs(previewAfter.top - previewBefore.top) <= density)
+        assertTrue("Opening tools must not resize the primary area", abs(primaryAfter.bottom - primaryBefore.bottom) <= density)
+        compose.onNodeWithContentDescription("收起续聊内容").assertIsDisplayed()
+        assertNull(copied.get())
+        assertNull(saved.get())
+        assertEquals(0, extraActions.get())
+        screenshot("result-preview-after-tools.png")
+
+        resultText("复制并打开 DeepSeek").performClick()
+        openTools()
+        compose.onNodeWithText("保存续聊文件").performScrollTo().performClick()
+        awaitToolsClosed()
+        val expected = ArchiveLogic.continuationExport(archive, emptyList()).text
+        assertEquals(expected, copied.get())
+        assertEquals(expected, saved.get())
+        assertTrue(expected.length > 8000)
+        assertTrue(requireNotNull(saved.get()).contains("完整文本尾标记"))
     }
 
     @Test fun homeHasOneImportActionAndKeepsHelpAndAlternativeInputReachable() {
@@ -204,6 +283,38 @@ class UiEntrypointSmokeTest {
         }
     }
 
+    /** Mirror the real result route's shared app bar; navigation callbacks stay inert. */
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun ResultTestFrame(content: @Composable () -> Unit) {
+        Scaffold(topBar = {
+            TopAppBar(
+                title = { Text("去 DeepSeek 续聊", style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold) },
+                navigationIcon = { IconButton(onClick = {}) { Icon(Icons.Outlined.ArrowBack, "返回") } },
+                actions = { IconButton(onClick = {}) { Icon(Icons.Outlined.Checklist, "整理进度") } },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Mist),
+            )
+        }) { innerPadding ->
+            Column(Modifier.fillMaxSize().padding(innerPadding)) { content() }
+        }
+    }
+
+    private fun resultText(text: String, substring: Boolean = false): SemanticsNodeInteraction {
+        compose.onNodeWithTag("result-list").performScrollToNode(hasText(text, substring = substring))
+        return compose.onNodeWithText(text, substring = substring).performScrollTo()
+    }
+
+    private fun openTools() {
+        compose.onNodeWithTag("result-list").performScrollToNode(hasTestTag("result-tool-trigger"))
+        compose.onNodeWithTag("result-tool-trigger").performScrollTo().performClick()
+        compose.onNodeWithTag("result-tools-sheet").assertIsDisplayed()
+    }
+
+    private fun awaitToolsClosed() = compose.waitUntil(10_000) {
+        compose.onAllNodes(hasTestTag("result-tools-sheet")).fetchSemanticsNodes().isEmpty()
+    }
+
     private fun awaitText(text: String) = compose.waitUntil(10_000) {
         compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()
     }
@@ -215,7 +326,7 @@ class UiEntrypointSmokeTest {
         // Semantics can lead the first SurfaceFlinger frame; capture only after the rendered UI settles.
         instrumentation.uiAutomation.waitForIdle(100, 2_000)
         val image = instrumentation.uiAutomation.takeScreenshot() ?: error("Could not capture test UI")
-        val directory = File(instrumentation.targetContext.getExternalFilesDir(null), "continuity-1.0.9-ui")
+        val directory = File(instrumentation.targetContext.filesDir, "result-layout-qa")
         check(directory.isDirectory || directory.mkdirs())
         File(directory, name).outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
         image.recycle()
