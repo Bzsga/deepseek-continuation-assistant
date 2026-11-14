@@ -792,7 +792,11 @@ fun ContinuationApp(
                                         imported(ids)
                                     }
                                 }
-                            "archives" -> ArchivesScreen(state.archives, { openRecord(it) }, import)
+                            "archives" -> ArchivesScreen(
+                                state.archives, { openRecord(it) }, import,
+                                busy = busy,
+                                onDelete = { controller.deleteArchives(it) },
+                            )
                             "selection" -> {
                                 val conversation =
                                     state.conversations.firstOrNull { it.id == conversationId }

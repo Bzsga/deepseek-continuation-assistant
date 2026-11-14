@@ -3,6 +3,8 @@
 package app.banzhan.deepseekcontinuation.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,6 +16,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -164,16 +168,31 @@ private fun HeroHeading() {
 }
 
 @Composable
-internal fun ArchiveSummary(archive: Archive, onOpen: () -> Unit) {
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+internal fun ArchiveSummary(
+    archive: Archive,
+    selected: Boolean? = null,
+    enabled: Boolean = true,
+    onLongClick: (() -> Unit)? = null,
+    onOpen: () -> Unit,
+) {
     Card(
-        onClick = onOpen,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.testTag("archive-row:${archive.id}").then(
+            if (selected != null) Modifier.toggleable(
+                value = selected, enabled = enabled, role = Role.Checkbox, onValueChange = { onOpen() },
+            ) else Modifier.combinedClickable(
+                enabled = enabled, role = Role.Button, onClick = onOpen, onLongClick = onLongClick,
+            )
+        ),
+        colors = CardDefaults.cardColors(containerColor =
+            if (selected == true) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(18.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Outlined.FolderOpen, null, tint = Blue)
+            if (selected != null) Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
+            else Icon(Icons.Outlined.FolderOpen, null, tint = Blue)
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(
@@ -190,7 +209,7 @@ internal fun ArchiveSummary(archive: Archive, onOpen: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Icon(Icons.Outlined.ChevronRight, "打开档案")
+            if (selected == null) Icon(Icons.Outlined.ChevronRight, "打开档案")
         }
     }
 }

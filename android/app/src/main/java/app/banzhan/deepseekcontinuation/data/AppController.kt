@@ -788,32 +788,51 @@ class AppController internal constructor(application: Application, databaseName:
         }
     }
 
-    suspend fun deleteArchive(archiveId: String) = operation {
-        val taskIds = mutex.withLock {
-            requireWritable()
-            deletingArchives.add(archiveId)
-            dao.tasks().filter { it.archiveId == archiveId }.map { it.id }
-        }
+    suspend fun deleteArchive(archiveId: String) = deleteArchives(setOf(archiveId))
+
+    suspend fun deleteArchives(archiveIds: Set<String>) = operation {
+        val selected = archiveIds.toSet()
+        if (selected.isEmpty()) return@operation
+        require(selected.none { it.isBlank() }) { "档案编号无效" }
+        var marked = false
         try {
-            taskIds.forEach { cancelTask(it) }
+            val tasks = mutex.withLock {
+                requireWritable()
+                require(selected.none { it in deletingArchives }) { "所选档案正在删除，请稍后操作" }
+                deletingArchives.addAll(selected)
+                marked = true
+                val current = dao.tasks().filter { it.archiveId in selected }.map { it.decodeTask() }
+                // Stop every selected task before releasing the lock, so a sibling cannot
+                // dispatch its next chunk while another selected task is being cancelled.
+                current.filter { it.status != "completed" }.forEach { saveTask(it.forCancellation()) }
+                current.forEach { jobs[it.id]?.cancel() }
+                current
+            }
+            tasks.forEach { cancelTaskInternal(it.id) }
+            tasks.forEach { jobs[it.id]?.cancelAndJoin() }
             mutex.withLock {
+                requireWritable()
                 database.withTransaction {
-                    dao.deleteArchive(archiveId)
-                    dao.deleteRevisions(archiveId)
-                    dao.deleteConflicts(archiveId)
-                    dao.deleteTasks(archiveId)
+                    selected.forEach { id ->
+                        dao.deleteArchive(id)
+                        dao.deleteRevisions(id)
+                        dao.deleteConflicts(id)
+                        dao.deleteTasks(id)
+                    }
                 }
-                taskIds.forEach { credentials.remove("task:$it") }
+                tasks.flatMap { listOf(it.secretRef, "task:${it.id}") }.filter { it.isNotBlank() }.distinct()
+                    .forEach { credentials.remove(it) }
                 refresh()
             }
         } finally {
-            withContext(NonCancellable) { mutex.withLock { deletingArchives.remove(archiveId) } }
+            if (marked) withContext(NonCancellable) { mutex.withLock { deletingArchives.removeAll(selected) } }
         }
     }
 
     suspend fun clearLocalData() = operation {
         val taskIds = mutex.withLock {
             requireWritable()
+            require(deletingArchives.isEmpty()) { "档案正在删除，请稍后操作" }
             clearingData = true
             dao.tasks().map { it.id }
         }
@@ -1118,18 +1137,17 @@ class AppController internal constructor(application: Application, databaseName:
         mutex.withLock { dao.task(taskId)?.decodeTask() }?.let { scheduleQuotaRefresh(it) }
     }
 
-    suspend fun cancelTask(taskId: String) = operation {
+    suspend fun cancelTask(taskId: String) = operation { cancelTaskInternal(taskId) }
+
+    private suspend fun cancelTaskInternal(taskId: String) {
         val task = mutex.withLock {
             val current = dao.task(taskId)?.decodeTask() ?: return@withLock null
             if (current.status == "completed") return@withLock null
-            val updated = current.withoutInFlight().copy(status = "cancelled", cancelRequested = true,
-                uncertain = current.uncertain || current.hasUncertainRequest(),
-                message = if (current.inFlight && current.settings.mode == "companion") "已停止后续整理。在途请求可能已占用免费次数，已完成分块仍保留。"
-                else if (current.inFlight) "已停止后续整理。在途请求可能已计费，已完成分块仍保留。" else "已取消，已完成分块仍保留。")
+            val updated = if (current.cancelRequested && current.status == "cancelled") current else current.forCancellation()
             saveTask(updated)
             refresh()
             updated
-        } ?: return@operation
+        } ?: return
         jobs[taskId]?.cancelAndJoin()
         val latest = mutex.withLock { dao.task(taskId)?.decodeTask() } ?: task
         if (latest.settings.mode == "companion") {
@@ -1158,6 +1176,11 @@ class AppController internal constructor(application: Application, databaseName:
         }
         scheduleQuotaRefresh(latest)
     }
+
+    private fun TaskRecord.forCancellation(): TaskRecord = withoutInFlight().copy(
+        status = "cancelled", cancelRequested = true, uncertain = uncertain || hasUncertainRequest(),
+        message = if (inFlight && settings.mode == "companion") "已停止后续整理。在途请求可能已占用免费次数，已完成分块仍保留。"
+        else if (inFlight) "已停止后续整理。在途请求可能已计费，已完成分块仍保留。" else "已取消，已完成分块仍保留。")
 
     suspend fun revisions(archiveId: String): List<Archive> = operation {
         mutex.withLock { dao.revisions(archiveId).map { appJson.decodeFromString<Archive>(it.payload) } }
@@ -1281,6 +1304,7 @@ class AppController internal constructor(application: Application, databaseName:
         val restoredSettings = validateSettings(backup.settings.withoutSecrets())
         mutex.withLock {
             requireWritable()
+            require(deletingArchives.isEmpty()) { "档案正在删除，请稍后操作" }
             require(jobs.values.all { it.isCompleted }) { "请先取消正在运行的任务再恢复备份" }
             val oldTaskIds = dao.tasks().map { it.id }
             conversationCacheValid = false
@@ -1497,6 +1521,7 @@ class AppController internal constructor(application: Application, databaseName:
             dao.put(ChunkCacheRow(chunk.cacheKey, appJson.encodeToString(entries)))
             database.withTransaction {
                 val task = dao.task(taskId)?.decodeTask() ?: return@withTransaction
+                if (task.archiveId in deletingArchives) return@withTransaction
                 if (task.chunks.first { it.id == chunk.id }.completed) return@withTransaction
                 val archive = loadArchive(task.archiveId)
                 require(taskSourcesFit(task, sourceIds(archive))) { "档案来源已变化，分块结果已保存，请新建整理任务" }
@@ -1572,6 +1597,7 @@ class AppController internal constructor(application: Application, databaseName:
     private suspend fun loadTask(id: String): TaskRecord = dao.task(id)?.decodeTask() ?: error("任务已不存在")
 
     private suspend fun saveArchive(archive: Archive, keepRevision: Boolean = true) {
+        require(archive.id !in deletingArchives) { "档案正在删除" }
         if (!conversationCacheValid) refresh(reloadConversations = true)
         BackupValidation.validateContinuity(archive, state.value.conversations)
         val previous = dao.archive(archive.id)

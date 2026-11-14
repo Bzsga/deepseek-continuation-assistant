@@ -12,6 +12,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.banzhan.deepseekcontinuation.core.*
@@ -25,20 +27,134 @@ internal fun ArchivesScreen(
     archives: List<Archive>,
     onArchive: (String) -> Unit,
     onImport: () -> Unit,
+    busy: Boolean = false,
+    onDelete: suspend (Set<String>) -> Unit,
 ) {
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        item { SectionTitle("续聊记录", "整理好的内容会自动保存在这里，随时可以接着聊。") }
-        if (archives.isEmpty()) {
-            item { NoticeCard("还没有保存的内容。导入一段聊天，就可以开始准备续聊。") }
-            item { Button(onClick = onImport) { Text("导入聊天") } }
+    var managing by rememberSaveable { mutableStateOf(false) }
+    var selectedIds by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+    var pendingDeletion by rememberSaveable { mutableStateOf<List<String>?>(null) }
+    var deleting by remember { mutableStateOf(false) }
+    var deleteError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val currentIds = archives.map { it.id }.toSet()
+    val selected = selectedIds.toSet().intersect(currentIds)
+    val controlsEnabled = !busy && !deleting
+    LaunchedEffect(currentIds) {
+        selectedIds = ArrayList(selectedIds.filter { it in currentIds })
+        if (currentIds.isEmpty() && !deleting) managing = false
+    }
+    fun finishManaging() {
+        managing = false
+        selectedIds = arrayListOf()
+        deleteError = null
+    }
+    androidx.activity.compose.BackHandler(enabled = managing && !deleting) { finishManaging() }
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+            if (managing) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("已选 ${selected.size} 项", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                    TextButton(
+                        onClick = {
+                            selectedIds = if (selected.size == currentIds.size) arrayListOf()
+                                else ArrayList(currentIds)
+                        },
+                        enabled = controlsEnabled,
+                    ) { Text(if (selected.size == currentIds.size) "取消全选" else "全选") }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    TextButton(onClick = { finishManaging() }, enabled = controlsEnabled) { Text("完成") }
+                    Button(
+                        onClick = { pendingDeletion = ArrayList(selected) },
+                        enabled = controlsEnabled && selected.isNotEmpty(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) {
+                        Icon(Icons.Outlined.DeleteOutline, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("删除（${selected.size}）")
+                    }
+                }
+            } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                    Box(Modifier.weight(1f)) {
+                        SectionTitle("续聊记录", "整理好的内容会自动保存在这里，随时可以接着聊。")
+                    }
+                    if (archives.isNotEmpty()) {
+                        TextButton(onClick = { managing = true }, enabled = controlsEnabled) { Text("管理") }
+                    }
+                }
+            }
+            deleteError?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp))
+            }
         }
-        items(archives.sortedByDescending { it.updatedAt }, key = { it.id }) {
-            ArchiveSummary(it) { onArchive(it.id) }
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth().testTag("archives-list"),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            if (archives.isEmpty()) {
+                item { NoticeCard("还没有保存的内容。导入一段聊天，就可以开始准备续聊。") }
+                item { Button(onClick = onImport) { Text("导入聊天") } }
+            }
+            items(archives.sortedByDescending { it.updatedAt }, key = { it.id }) { archive ->
+                ArchiveSummary(
+                    archive,
+                    selected = if (managing) archive.id in selected else null,
+                    enabled = !deleting,
+                    onLongClick = {
+                        if (controlsEnabled) {
+                            managing = true
+                            selectedIds = ArrayList(selected + archive.id)
+                        }
+                    },
+                ) {
+                    if (managing) {
+                        if (controlsEnabled) {
+                            selectedIds = ArrayList(if (archive.id in selected) selected - archive.id else selected + archive.id)
+                        }
+                    } else onArchive(archive.id)
+                }
+            }
         }
+    }
+    pendingDeletion?.let { ids ->
+        AlertDialog(
+            onDismissRequest = { if (!deleting) pendingDeletion = null },
+            title = { Text("删除 ${ids.size} 条续聊记录？") },
+            text = { Text("将删除所选续聊记录及其历史，并停止相关整理任务。原始导入和未选记录会保留。删除后无法撤销。") },
+            confirmButton = {
+                TextButton(
+                    modifier = Modifier.testTag("archive-delete-confirm"),
+                    enabled = controlsEnabled,
+                    onClick = {
+                        if (!deleting) {
+                            deleting = true
+                            deleteError = null
+                            scope.launch {
+                                try {
+                                    onDelete(ids.toSet())
+                                    pendingDeletion = null
+                                    finishManaging()
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (error: Exception) {
+                                    pendingDeletion = null
+                                    deleteError = error.message?.takeIf { it.isNotBlank() }
+                                        ?: "删除失败，请稍后重试。"
+                                } finally {
+                                    deleting = false
+                                }
+                            }
+                        }
+                    },
+                ) { Text(if (deleting) "正在删除…" else "删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeletion = null }, enabled = !deleting) { Text("取消") }
+            },
+        )
     }
 }
 
