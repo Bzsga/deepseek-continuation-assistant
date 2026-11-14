@@ -25,6 +25,8 @@ data class AdminConfig(
     val mockMode: Boolean,
     val costKnown: Boolean,
     val configVersion: Int,
+    val publicRegistrationLimit: Int = 20,
+    val publicRegisteredCount: Int = 0,
 )
 
 data class AdminTotals(
@@ -62,6 +64,19 @@ data class UserUsage(
     val cancelled: Long, val inputTokens: Long, val outputTokens: Long,
     val usageKnownRequests: Long? = null,
     val usageUnknownRequests: Long? = null,
+    val username: String? = null,
+    val registrationKind: String? = null,
+    val dailyLimitOverride: Int? = null,
 )
 
-data class AdminUsersPage(val limit: Int, val offset: Int, val total: Long, val users: List<UserUsage>)
+data class AdminUsersPage(val limit: Int, val offset: Int, val total: Long, val users: List<UserUsage>,
+    val day: String? = null, val resetAt: String? = null)
+
+data class AdminRegistrationInvite(
+    val id: String,
+    val code: String? = null,
+    val expiresAt: String,
+    val createdAt: String = "",
+    val usedAt: String? = null,
+    val usedBy: String? = null,
+)

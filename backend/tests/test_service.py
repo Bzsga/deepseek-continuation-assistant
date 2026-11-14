@@ -448,7 +448,8 @@ def test_inflight_keeps_original_runtime_settings(settings, monkeypatch):
     app = create_app(replace(settings, public_enabled=True, worker_enabled=True, mock_mode=False,
                              api_enabled=True, api_key="old-synthetic-key"))
     with TestClient(app) as client:
-        session = client.post("/v1/sessions").json()
+        session = client.post("/v1/accounts/register", json={
+            "username": "inflight_synthetic", "password": "synthetic password 123"}).json()
         headers = {"Authorization": "Bearer " + session["token"]}
         first = client.post("/v1/jobs", headers=headers, json=payload()).json()
         assert entered.wait(3)

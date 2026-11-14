@@ -142,6 +142,7 @@ internal fun PreparationScreen(
     onAdvanced: (String?) -> Unit,
     onSavedTask: (String) -> Unit,
     onQuick: ((PreparationChoice) -> Unit)? = null,
+    onAccount: () -> Unit = onService,
 ) {
     val settings = state.settings
     var branchId by
@@ -167,6 +168,9 @@ internal fun PreparationScreen(
     var preview by remember { mutableStateOf<ChatMessage?>(null) }
     val messages =
         remember(branch, selected) { branch?.messages?.filter { it.id in selected }.orEmpty() }
+    val prefersOriginal = remember(messages) { ConversationPreparation.prefersOriginal(messages) }
+    var smartRequested by rememberSaveable(conversation.id, branchId, selected) { mutableStateOf(false) }
+    val originalFirst = prefersOriginal && !smartRequested
     var estimate by remember { mutableStateOf<Result<OrganizationEstimate>?>(null) }
     LaunchedEffect(messages, settings, state.quota) {
         estimate = null
@@ -175,16 +179,17 @@ internal fun PreparationScreen(
     val choice = PreparationChoice(title, branchId.orEmpty(), selected, background)
     val canStart = !busy && branch != null && messages.isNotEmpty() && title.isNotBlank()
     val savedTask = resumablePreparationTask(conversation.id, state)
+    val needsLogin = settings.mode == "companion" && state.account.currentUser == null
     val freeReady =
         settings.mode != "companion" ||
-            (state.quota != null &&
+            (!needsLogin && state.quota != null &&
                 state.quota.organizationBlocker() == null &&
                 !state.quotaLoading &&
                 state.quotaError == null &&
                 estimate?.isSuccess == true)
     val configured = if (settings.mode == "companion") true else settings.apiKey.isNotBlank()
     LazyColumn(
-        Modifier.fillMaxSize().imePadding(),
+        Modifier.fillMaxSize().imePadding().testTag("preparation-list"),
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -282,7 +287,22 @@ internal fun PreparationScreen(
                 OrganizationFailureReason(it)
                 Spacer(Modifier.height(10.dp))
             }
-            if (settings.mode == "companion") {
+            if (originalFirst) {
+                Text("这段聊天较短，可以直接保留完整原文，无需等待智能整理。",
+                    style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(10.dp))
+                Button(onClick = { onOriginal(choice) }, enabled = canStart) {
+                    Icon(Icons.Outlined.Forum, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text("直接使用原文")
+                }
+                TextButton(onClick = { smartRequested = true }, enabled = canStart) { Text("改用智能整理") }
+            } else {
+            if (needsLogin) {
+                Text("登录后可使用免费智能整理，也可以直接使用原文或选择自己的 API。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else if (settings.mode == "companion") {
                 Text(
                     "点击开始会将所选内容发送到我们的整理服务，免费使用。",
                     style = MaterialTheme.typography.bodySmall,
@@ -298,9 +318,7 @@ internal fun PreparationScreen(
                 )
                 Spacer(Modifier.height(8.dp))
                 FreeQuotaCard(state, onQuotaRefresh)
-                val available =
-                    listOfNotNull(state.quota?.userDailyRemaining, state.quota?.dailyRemaining)
-                        .minOrNull()
+                val available = state.quota?.userDailyRemaining
                 val requests = estimate?.getOrNull()?.chunks
                 if (available != null && requests != null && state.quota.requestUpperBound(requests) > available) {
                     Text(
@@ -329,17 +347,22 @@ internal fun PreparationScreen(
                 )
             }
             Spacer(Modifier.height(10.dp))
-            Button(onClick = { onStart(choice) }, enabled = canStart && freeReady) {
+            Button(onClick = { if (needsLogin) onAccount() else onStart(choice) },
+                enabled = canStart && (needsLogin || freeReady)) {
                 Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(7.dp))
-                Text(if (busy) "正在准备…" else "开始智能整理")
+                Text(if (busy) "正在准备…" else if (needsLogin) "登录后免费整理" else "开始智能整理")
             }
             if (error != null || !configured || state.quotaError != null)
                 TextButton(onClick = onService, enabled = !busy) {
                     Text(if (configured) "检查服务设置" else "设置自己的 API")
                 }
+            }
         }
-        item {
+        if (!originalFirst) item {
+            if (prefersOriginal) {
+                TextButton(onClick = { onOriginal(choice) }, enabled = canStart) { Text("直接使用完整原文") }
+            }
             if (onQuick != null)
                 OutlinedButton(onClick = { onQuick(choice) }, enabled = canStart) { Text("先快速接续") }
             else OutlinedButton(onClick = { onOriginal(choice) }, enabled = canStart) { Text("先带走原文") }
@@ -449,6 +472,8 @@ internal fun OrganizationProgressScreen(
     onRebuild: () -> Unit,
     onSavedContent: () -> Unit,
     onOriginalArchive: (() -> Unit)? = null,
+    needsLogin: Boolean = false,
+    onAccount: () -> Unit = onService,
 ) {
     var confirmResume by remember { mutableStateOf(false) }
     var confirmCancel by remember { mutableStateOf(false) }
@@ -528,11 +553,12 @@ internal fun OrganizationProgressScreen(
                 if (task?.status in setOf("paused", "cancelled") && task != null)
                     Button(
                         onClick = {
-                            if (task.uncertain) confirmResume = true
+                            if (needsLogin) onAccount()
+                            else if (task.uncertain) confirmResume = true
                             else run { controller.resumeTask(task.id, false) }
                         }
                     ) {
-                        Text("继续上次整理")
+                        Text(if (needsLogin) "登录后继续整理" else "继续上次整理")
                     }
                 if (task != null && task.status !in setOf("completed", "cancelled"))
                     TextButton(onClick = { confirmCancel = true }) { Text("取消整理") }

@@ -17,6 +17,7 @@ from app.provider import ProviderOutcome, snapshot_for
 from app.runner import source_payload
 from app.schemas import JobRequest
 from app.store import digest
+from account_fixtures import registered_session
 
 
 SOURCES = [{"id": "quoted-fragment-1", "role": "user", "content": "合成片段：关于某项现实公共政策的争议。"}]
@@ -35,7 +36,7 @@ def payload(key="political-filter-job-0001", operation="political_filter"):
 
 
 def session(client):
-    result = client.post("/v1/sessions").json()
+    result = registered_session(client)
     return {"Authorization": "Bearer " + result["token"]}
 
 

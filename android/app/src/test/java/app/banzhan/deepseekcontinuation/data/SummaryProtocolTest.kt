@@ -230,7 +230,7 @@ class SummaryProtocolTest {
         assertEquals(0, quota.userDailyReserved)
         assertEquals("2026-11-04T00:00:00+08:00", quota.resetAt)
         assertNull(quota.organizationBlocker())
-        assertTrue(quota.copy(dailyRemaining = 0).organizationBlocker().orEmpty().contains("总次数已用完"))
+        assertEquals("免费智能整理暂时不可用，请稍后再试", quota.copy(dailyRemaining = 0).organizationBlocker())
         assertTrue(quota.copy(userDailyRemaining = 0).organizationBlocker().orEmpty().contains("你今日"))
         assertNotNull(quota.copy(userDailyRemaining = null).organizationBlocker())
         val withoutCurrency = publicQuotaPayload().replace(",\"remaining_cny\":0,\"per_job_limit_cny\":0", "")

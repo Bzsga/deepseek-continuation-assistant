@@ -13,7 +13,7 @@ import app.banzhan.deepseekcontinuation.data.fallbackAttemptLimit
 
 @Composable
 internal fun FreeQuotaCard(state: AppState, onRefresh: () -> Unit) {
-    var details by remember(state.quotaError) { mutableStateOf(false) }
+    val signedIn = state.account.currentUser != null
     Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
@@ -21,27 +21,26 @@ internal fun FreeQuotaCard(state: AppState, onRefresh: () -> Unit) {
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("今日免费次数", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                TextButton(onClick = onRefresh, enabled = !state.quotaLoading) {
-                    Text(if (state.quotaLoading) "获取中" else "刷新")
+                if (signedIn) TextButton(onClick = onRefresh, enabled = !state.quotaLoading && !state.account.loading) {
+                    Text(if (state.quotaLoading || state.account.loading) "获取中" else "刷新")
                 }
             }
             val quota = state.quota
             when {
-                state.quotaLoading -> {
+                !signedIn -> Text(
+                    if (state.account.loading) "正在读取账户…" else "登录后可查看和使用免费智能整理。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                state.quotaLoading || state.account.loading -> {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
-                    Text("正在获取个人与全站剩余次数。", style = MaterialTheme.typography.bodySmall)
+                    Text("正在获取你的剩余次数。", style = MaterialTheme.typography.bodySmall)
                 }
                 state.quotaError != null -> {
                     Text("未能获取剩余次数，请刷新重试。", color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = { details = !details }) {
-                        Text(if (details) "收起原因" else "查看原因")
-                    }
-                    if (details) Text(state.quotaError, style = MaterialTheme.typography.bodySmall)
                 }
                 quota == null -> Text("尚未获取剩余次数。", style = MaterialTheme.typography.bodySmall)
                 else -> {
                     QuotaLine("你今天还可用", quota.userDailyRemaining, quota.userDailyLimit)
-                    QuotaLine("全站今天还可用", quota.dailyRemaining, quota.dailyLimit)
                     if (quota.fallbackAttemptLimit > 1)
                         Text(
                             automaticFallbackNotice(quota.fallbackAttemptLimit),
@@ -56,12 +55,9 @@ internal fun FreeQuotaCard(state: AppState, onRefresh: () -> Unit) {
                         )
                     if (quota.userDailyRemaining == 0)
                         Text("你今天的免费次数已用完。", style = MaterialTheme.typography.bodySmall)
-                    else if (quota.dailyRemaining == 0)
-                        Text("全站今天的免费次数已用完。", style = MaterialTheme.typography.bodySmall)
                     val pending =
                         listOfNotNull(
                                 quota.userDailyReserved?.takeIf { it > 0 }?.let { "你已预留 $it 次" },
-                                quota.dailyReserved?.takeIf { it > 0 }?.let { "全站已预留 $it 次" },
                             )
                             .joinToString("，")
                     if (pending.isNotEmpty())

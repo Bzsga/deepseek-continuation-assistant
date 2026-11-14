@@ -21,6 +21,7 @@ data class AppState(
     val quota: CompanionQuota? = null,
     val quotaLoading: Boolean = false,
     val quotaError: String? = null,
+    val account: AccountState = AccountState(),
     val developerPrefs: DeveloperPrefs = DeveloperPrefs(),
     val adminConfig: AdminConfig? = null,
     val adminLoading: Boolean = false,
@@ -31,6 +32,9 @@ data class AppState(
     val adminUsers: AdminUsersPage? = null,
     val adminUsersLoading: Boolean = false,
     val adminUsersError: String? = null,
+    val adminRegistrationInvites: List<AdminRegistrationInvite>? = null,
+    val adminRegistrationLoading: Boolean = false,
+    val adminRegistrationError: String? = null,
     val connectionTestLoading: Boolean = false,
     val connectionTestResult: ConnectionTestResult? = null,
     val connectionTestError: String? = null,
@@ -143,6 +147,8 @@ internal data class TaskRecord(
     // Exact prior, already-selected source IDs used by this task's first chunk only.
     // Missing fields on existing paid tasks never authorize additional references.
     val initialContextScope: ArchiveSourceScope? = null,
+    // Opaque ownership metadata permits same-account recovery without changing frozen settings/cache keys.
+    val ownerUserId: String? = null,
 ) {
     fun display() = OrganizationTask(
         id, archiveId, label, status, chunks.count { it.completed }, chunks.size, message,

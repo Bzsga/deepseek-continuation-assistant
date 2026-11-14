@@ -5,6 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.main import create_app
+from account_fixtures import registered_session
 
 
 def message(content, role="user", source="conversation-" + "a" * 64 + ":message:" + "b" * 64):
@@ -14,13 +15,11 @@ def message(content, role="user", source="conversation-" + "a" * 64 + ":message:
 @pytest.fixture
 def settings(tmp_path):
     return Settings(db_path=str(tmp_path / "compatibility.sqlite3"),
-                    mock_mode=True, public_enabled=True, worker_enabled=False)
+                    mock_mode=True, public_enabled=True, worker_enabled=False, context_tokens=64000)
 
 
 def session(client):
-    response = client.post("/v1/sessions", json={})
-    assert response.status_code == 200
-    return {"Authorization": "Bearer " + response.json()["token"]}
+    return {"Authorization": "Bearer " + registered_session(client)["token"]}
 
 
 @pytest.mark.parametrize("messages,key", [

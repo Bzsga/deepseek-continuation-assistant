@@ -1,18 +1,18 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .config import Settings
-from .admin_access import build_admin_router, initialize_admin
+from .admin_access import _client_ip, build_admin_router, initialize_admin
 from .feedback import FeedbackStore, MAX_FEEDBACK_BODY_BYTES, build_feedback_router
 from .diagnostics import DiagnosticsStore, MAX_DIAGNOSTIC_BODY_BYTES, build_diagnostics_router
 from .runner import Runner, ServiceLease
-from .schemas import (JobRequest, RedeemRequest, MAX_SOURCE_CHARACTERS, MAX_SOURCE_MESSAGES,
+from .schemas import (AccountLoginRequest, AccountRegisterRequest, JobRequest, RedeemRequest, MAX_SOURCE_CHARACTERS, MAX_SOURCE_MESSAGES,
                       MAX_FILTER_CHARACTERS, MAX_FILTER_MESSAGES)
-from .store import ServiceError, Store
+from .store import ServiceError, Store, digest
 
 
 class BoundedBodyMiddleware:
@@ -98,6 +98,8 @@ def create_app(settings=None):
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, error):
+        if request.url.path.startswith("/v1/accounts/"):
+            return JSONResponse({"detail": "账号信息格式不正确，请检查用户名、密码和邀请码"}, status_code=422)
         if request.url.path == "/v1/diagnostics":
             return JSONResponse({"detail": "诊断日志格式不正确；仅接受受支持的技术信息"}, status_code=422)
         if request.url.path.startswith(("/v1/feedback", "/v1/admin/feedback")):
@@ -134,11 +136,14 @@ def create_app(settings=None):
                     detail = f"消息正文或来源关系未通过校验，单次正文上限为 {MAX_SOURCE_CHARACTERS} 字符。"
         return JSONResponse({"detail": detail}, status_code=422)
 
-    def owner(authorization: str | None = Header(default=None)):
+    def bearer(authorization: str | None = Header(default=None)):
         parts = (authorization or "").split(" ", 1)
         if len(parts) != 2 or parts[0].lower() != "bearer":
             raise ServiceError(401, "请先连接整理服务并提供会话凭据")
-        return store.authenticate(parts[1])
+        return parts[1]
+
+    def owner(token=Depends(bearer)):
+        return store.authenticate(token)
 
     app.include_router(build_feedback_router(store, feedback, owner))
     app.include_router(build_diagnostics_router(store, diagnostics, owner))
@@ -163,13 +168,33 @@ def create_app(settings=None):
         token, quota = store.create_session()
         return {"token": token, "quota": quota}
 
+    @app.post("/v1/accounts/register")
+    def register_account(body: AccountRegisterRequest, request: Request, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return store.accounts.register(body.username, body.password, body.invitation_code, _client_ip(request))
+
+    @app.post("/v1/accounts/login")
+    def login_account(body: AccountLoginRequest, request: Request, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return store.accounts.login(body.username, body.password, _client_ip(request))
+
+    @app.get("/v1/accounts/me")
+    def account_me(response: Response, owner_id=Depends(owner)):
+        response.headers["Cache-Control"] = "no-store"
+        return store.accounts.me(owner_id)
+
+    @app.post("/v1/accounts/logout")
+    def logout_account(response: Response, token=Depends(bearer)):
+        response.headers["Cache-Control"] = "no-store"
+        return store.accounts.logout(token)
+
     @app.get("/v1/quota")
     def quota(owner_id=Depends(owner)):
         return store.quota(owner_id)
 
     @app.post("/v1/jobs")
-    async def submit(body: JobRequest, owner_id=Depends(owner)):
-        result = await asyncio.to_thread(store.create_job, owner_id, body)
+    async def submit(body: JobRequest, owner_id=Depends(owner), token=Depends(bearer)):
+        result = await asyncio.to_thread(store.create_job, owner_id, body, account_session_hash=digest(token))
         runner.notify()
         return result
 

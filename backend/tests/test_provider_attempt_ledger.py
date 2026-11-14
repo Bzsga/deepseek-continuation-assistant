@@ -11,6 +11,7 @@ from app.config import ProviderRoute, Settings
 from app.provider import ProviderOutcome
 from app.schemas import JobRequest
 from app.store import SHANGHAI, Store, configuration_fingerprint, local_day
+from account_fixtures import register_owner
 
 
 @pytest.fixture
@@ -32,15 +33,18 @@ def settings(tmp_path):
 def prepare(settings):
     store = Store(settings)
     store.initialize()
-    token, _ = store.create_session()
-    return store, store.authenticate(token)
+    owner, _ = register_owner(store)
+    return store, owner
 
 
 def submit(store, owner, key="ledger-job-0001"):
+    with store.connection() as db:
+        session_hash = db.execute("SELECT token_hash FROM account_sessions WHERE user_id=? AND revoked_at IS NULL",
+                                  (owner,)).fetchone()[0]
     return store.create_job(owner, JobRequest.model_validate({
         "idempotency_key": key,
         "messages": [{"id": "synthetic-source-1", "role": "user", "content": "Synthetic private source"}],
-    }))
+    }), account_session_hash=session_hash)
 
 
 def route(settings, ordinal, route_id="primary"):
@@ -78,8 +82,7 @@ def test_fastest_route_can_be_first_and_every_extra_dispatch_counts(settings):
 def test_last_global_slot_is_atomic_across_workers(settings):
     settings = replace(settings, daily_limit=3, user_daily_limit=3)
     store, first_owner = prepare(settings)
-    token, _ = store.create_session()
-    second_owner = store.authenticate(token)
+    second_owner, _ = register_owner(store)
     jobs = [submit(store, first_owner, "ledger-global-0001"), submit(store, second_owner, "ledger-global-0002")]
     for job in jobs:
         assert store.claim_next()

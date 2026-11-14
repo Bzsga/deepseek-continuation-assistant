@@ -17,7 +17,7 @@ DAY = 86400
 TERMINAL = {"completed", "failed", "uncertain", "cancelled"}
 SHANGHAI = timezone(timedelta(hours=8), "Asia/Shanghai")
 RUNTIME_FIELDS = {
-    "public_enabled", "daily_limit", "user_daily_limit", "model", "base_url", "api_key",
+    "public_enabled", "daily_limit", "user_daily_limit", "public_registration_limit", "model", "base_url", "api_key",
     "context_tokens", "max_output_tokens", "provider_timeout_seconds",
 }
 
@@ -82,6 +82,8 @@ def digest(secret):
 class Store:
     def __init__(self, settings: Settings):
         self.settings = settings
+        from .accounts import Accounts
+        self.accounts = Accounts(self)
 
     @contextmanager
     def connection(self, write=False):
@@ -182,6 +184,12 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS jobs_daily ON jobs(count_state,count_day,owner_id)")
             db.execute("INSERT OR IGNORE INTO runtime_config VALUES(1,'{}',0)")
             db.commit()
+        self.accounts.initialize()
+        with self.connection(write=True) as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS account_daily_caps (
+                user_id TEXT NOT NULL REFERENCES registered_accounts(user_id), day TEXT NOT NULL,
+                limit_total INTEGER NOT NULL CHECK(limit_total>=0), PRIMARY KEY(user_id,day)
+            )""")
 
     def _settings(self, db):
         row = db.execute("SELECT data FROM runtime_config WHERE id=1").fetchone()
@@ -198,6 +206,7 @@ class Store:
             "api_key_configured": bool(settings.api_key), "api_enabled": settings.api_enabled,
             "mock_mode": settings.mock_mode, "cost_known": settings.cost_known,
             "config_version": db.execute("SELECT version FROM runtime_config WHERE id=1").fetchone()[0],
+            "public_registered_count": self.accounts.public_registered_count(db),
         })
         return result
 
@@ -238,12 +247,51 @@ class Store:
             "reset_at": reset_at(now),
         }
         if owner_id is not None:
+            base_limit = settings.user_daily_limit
+            account = db.execute("SELECT daily_limit_override FROM registered_accounts WHERE user_id=?", (owner_id,)).fetchone()
+            if account is not None and account["daily_limit_override"] is not None:
+                base_limit = account["daily_limit_override"]
+            today = db.execute("SELECT limit_total FROM account_daily_caps WHERE user_id=? AND day=?",
+                               (owner_id, local_day(now))).fetchone()
+            effective_limit = today["limit_total"] if today is not None else base_limit
             result.update({
-                "user_daily_limit": settings.user_daily_limit, "user_daily_used": row["user_used"],
+                "user_daily_limit": effective_limit, "user_daily_used": row["user_used"],
                 "user_daily_reserved": reserved["user_reserved"],
-                "user_daily_remaining": max(0, settings.user_daily_limit - row["user_used"] - reserved["user_reserved"]),
+                "user_daily_remaining": max(0, effective_limit - row["user_used"] - reserved["user_reserved"]),
             })
         return result
+
+    def update_user_quota(self, owner_id, changes):
+        if not changes or not set(changes).issubset({"daily_limit", "today_remaining", "day"}):
+            raise ServiceError(422, "请填写每日上限或今日剩余次数")
+        for name in ("daily_limit", "today_remaining"):
+            if name in changes and not (name == "daily_limit" and changes[name] is None):
+                if type(changes[name]) is not int or not 0 <= changes[name] <= 1_000_000:
+                    raise ServiceError(422, "次数须为 0 到 1000000 的整数")
+        if "day" in changes and "today_remaining" not in changes:
+            raise ServiceError(422, "日期仅用于确认今日剩余次数的修改")
+        with self.connection(write=True) as db:
+            account = db.execute("SELECT user_id FROM registered_accounts WHERE user_id=?", (owner_id,)).fetchone()
+            if account is None:
+                raise ServiceError(404, "注册用户不存在")
+            now = time.time()
+            day = local_day(now)
+            if changes.get("day", day) != day:
+                raise ServiceError(409, "日期已变化，请刷新用户额度后重试")
+            if "daily_limit" in changes:
+                db.execute("UPDATE registered_accounts SET daily_limit_override=? WHERE user_id=?",
+                           (changes["daily_limit"], owner_id))
+            if "today_remaining" in changes:
+                quota = self.daily_quota(db, owner_id, timestamp=now)
+                limit_total = quota["user_daily_used"] + quota["user_daily_reserved"] + changes["today_remaining"]
+                db.execute("""INSERT INTO account_daily_caps VALUES(?,?,?) ON CONFLICT(user_id,day)
+                    DO UPDATE SET limit_total=excluded.limit_total""", (owner_id, day, limit_total))
+            quota = self.daily_quota(db, owner_id, timestamp=now)
+            override = db.execute("SELECT daily_limit_override FROM registered_accounts WHERE user_id=?", (owner_id,)).fetchone()[0]
+            return {"id": owner_id, "daily_limit_override": override, "day": day,
+                    "daily_limit": quota["user_daily_limit"], "daily_used": quota["user_daily_used"],
+                    "daily_reserved": quota["user_daily_reserved"], "daily_remaining": quota["user_daily_remaining"],
+                    "reset_at": quota["reset_at"]}
 
     def _touch_user(self, db, owner_id, timestamp):
         db.execute("UPDATE users SET last_seen=? WHERE id=?", (timestamp, owner_id))
@@ -290,10 +338,12 @@ class Store:
             raise ServiceError(401, "请先连接整理服务以建立会话")
         with self.connection(write=True) as db:
             row = db.execute("SELECT id FROM users WHERE token_hash=?", (digest(token),)).fetchone()
-            if not row:
-                raise ServiceError(401, "会话凭据无效，请重新连接整理服务")
-            self._touch_user(db, row["id"], time.time())
-        return row["id"]
+        owner_id = row["id"] if row else self.accounts.authenticate(token)
+        if owner_id is None:
+            raise ServiceError(401, "会话凭据无效或已过期，请重新登录")
+        with self.connection(write=True) as db:
+            self._touch_user(db, owner_id, time.time())
+        return owner_id
 
     def _caps(self, db, settings=None):
         settings = settings or self._settings(db)
@@ -332,7 +382,7 @@ class Store:
             enabled = settings.enabled and all(value > 0 for value in caps.values())
             message = "邀请码整理可用" if enabled else "邀请码整理尚未启用，管理员需配置服务、单价及金额预算"
             per_job = caps["per_job"]
-        if settings.daily_limit == 0 or settings.user_daily_limit == 0:
+        if settings.daily_limit == 0 or daily["user_daily_limit"] == 0:
             enabled = False
             message = "整理服务已暂停，请稍后再试"
         elif enabled and (daily["daily_remaining"] == 0 or daily["user_daily_remaining"] == 0):
@@ -359,7 +409,7 @@ class Store:
             quota = self._quota(db, owner_id)
         return {key: value for key, value in quota.items() if not key.endswith("micros")}
 
-    def create_job(self, owner_id, request):
+    def create_job(self, owner_id, request, account_session_hash=None):
         messages = [message.model_dump() for message in request.messages]
         context_messages = [message.model_dump() for message in request.context_messages]
         # Keep legacy empty-context bytes and idempotency fingerprints unchanged.
@@ -376,6 +426,12 @@ class Store:
                 return self._view(previous)
             settings, now = self._settings(db), time.time()
             quota = self._quota(db, owner_id, settings, now)
+            account = db.execute("SELECT user_id FROM registered_accounts WHERE user_id=?", (owner_id,)).fetchone()
+            if quota["access_mode"] == "public" and account is None:
+                raise ServiceError(401, "免费智能整理需要注册并登录，原任务仍可查询或取消")
+            if account is not None and (not account_session_hash or
+                    not self.accounts.is_session_active_hash(account_session_hash, db=db)):
+                raise ServiceError(401, "登录已失效，请重新登录原账号后继续")
             if not quota["enabled"]:
                 raise ServiceError(503, quota["message"])
             if quota["daily_remaining"] == 0 or quota["user_daily_remaining"] == 0:
@@ -388,6 +444,8 @@ class Store:
                 reserve = 0
             snapshot.update({"configuration_fingerprint": configuration_fingerprint(settings),
                              "access_mode": quota["access_mode"]})
+            if account is not None and account_session_hash is not None:
+                snapshot["account_session_hash"] = account_session_hash
             if snapshot["input_bound"] + snapshot["output_bound"] > settings.context_tokens:
                 raise ServiceError(413, "该段内容超出模型上下文的保守上限，请缩短后重新提交")
             if quota["access_mode"] == "invitation":
@@ -459,7 +517,7 @@ class Store:
                 )
                 within_limits = (
                     quota["daily_used"] + quota["daily_reserved"] <= settings.daily_limit
-                    and quota["user_daily_used"] + quota["user_daily_reserved"] <= settings.user_daily_limit
+                    and quota["user_daily_used"] + quota["user_daily_reserved"] <= quota["user_daily_limit"]
                 )
                 if not quota["enabled"] or not compatible or not within_limits:
                     db.execute("""UPDATE jobs SET status='failed',message=?,reserved=0,count_state='none',
@@ -510,7 +568,7 @@ class Store:
             if not quota["enabled"] or snapshot.get("access_mode") != quota["access_mode"]:
                 return None
             if (quota["daily_used"] + quota["daily_reserved"] > settings.daily_limit
-                    or quota["user_daily_used"] + quota["user_daily_reserved"] > settings.user_daily_limit):
+                    or quota["user_daily_used"] + quota["user_daily_reserved"] > quota["user_daily_limit"]):
                 return None
             # Automatic alternatives are limited to unpriced public count mode.
             # Historical monetary reservations retain their single-route path.
@@ -519,6 +577,9 @@ class Store:
             ):
                 return None
             if ordinal > 0:
+                session_hash = snapshot.get("account_session_hash")
+                if (not session_hash or not self.accounts.is_session_active_hash(session_hash, db=db)):
+                    return None
                 if quota["daily_remaining"] <= 0 or quota["user_daily_remaining"] <= 0:
                     return None
             attempt_id = str(uuid.uuid4())

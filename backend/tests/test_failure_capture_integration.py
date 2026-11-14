@@ -17,6 +17,7 @@ from app.failure_artifacts import ArtifactError
 from app.main import create_app
 from app.provider import ProviderOutcome, snapshot_for
 from app.runner import Runner
+from account_fixtures import registered_session
 
 
 PRIVATE = "SYNTHETIC_FAILURE_BODY_DO_NOT_EXPOSE"
@@ -57,7 +58,7 @@ def install_http(monkeypatch, responder):
 
 
 def submit(client, *, text="合成来源资料", key="failure-capture-case"):
-    headers = {"Authorization": "Bearer " + client.post("/v1/sessions").json()["token"]}
+    headers = {"Authorization": "Bearer " + registered_session(client)["token"]}
     body = {"idempotency_key": key, "messages": [{"id": "original-source", "role": "user", "content": text}]}
     response = client.post("/v1/jobs", headers=headers, json=body)
     assert response.status_code == 200

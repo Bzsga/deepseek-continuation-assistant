@@ -65,6 +65,8 @@ data class PoliticalExportTask(
     val status: String = "queued",
     val message: String = "等待检查",
     val keptHitIds: Set<String> = emptySet(),
+    // Missing on old local checks; never infer their owner from a later login.
+    val ownerUserId: String? = null,
 ) {
     val done: Int get() = batches.count { it.completed }
     val total: Int get() = batches.size
@@ -120,6 +122,7 @@ class PoliticalExportManager internal constructor(
     private var worker: Job? = null
     private var loadFailed = false
     private var prepared: Prepared? = null
+    private var accountSession: AccountSession? = null
     private data class Prepared(val plan: PoliticalExportPlan, val settings: ServiceSettings, val batches: List<List<PoliticalTextPart>>)
 
     init {
@@ -148,6 +151,27 @@ class PoliticalExportManager internal constructor(
 
     fun clearError() = mutableState.update { it.copy(error = null) }
 
+    /** Updates only the current account context; never starts or resumes a request. */
+    suspend fun setAccountSession(session: AccountSession?) {
+        ready.await()
+        mutex.withLock {
+            if (accountSession != session && prepared?.settings?.mode == "companion") prepared = null
+            accountSession = session
+        }
+    }
+
+    /** Stop future account requests while preserving original IDs, progress and task credentials. */
+    suspend fun suspendAccountTasks() = withContext(Dispatchers.IO) {
+        ready.await()
+        val running = mutex.withLock {
+            val task = mutableState.value.task
+            if (task?.settings?.mode != "companion") return@withContext
+            if (task.status in setOf("queued", "running")) persist(task.afterAccountLogout())
+            worker
+        }
+        running?.cancelAndJoin()
+    }
+
     suspend fun prepare(archiveId: String, text: String, settings: ServiceSettings, quota: CompanionQuota?): PoliticalExportPlan =
         withContext(Dispatchers.IO) {
             ready.await()
@@ -157,6 +181,7 @@ class PoliticalExportManager internal constructor(
                 require(archiveId.isNotBlank() && text.isNotBlank() && text.length <= MAX_TEXT_CHARS) {
                     "续聊文本为空或过长，请减少原文片段后再检查。"
                 }
+                politicalOwnerForNewTask(settings, accountSession)
                 val captured = politicalSettings(settings, quota)
                 val batches = PoliticalFilterProtocol.batches(text, captured)
                 require(batches.isNotEmpty()) { "没有可检查的文字" }
@@ -180,10 +205,11 @@ class PoliticalExportManager internal constructor(
             if (current?.id == plan.id) return@withLock
             require(current == null && !loadFailed) { "已有检查记录，请先处理它" }
             val pending = prepared?.takeIf { it.plan == plan } ?: error("检查预估已失效，请重新查看预计次数。")
+            val ownerId = politicalOwnerForNewTask(pending.settings, accountSession)
             val task = PoliticalExportTask(plan.id, plan.archiveId, plan.originalText, hash(plan.originalText),
                 pending.settings.withoutSecrets(), pending.batches.mapIndexed { index, parts ->
                     PoliticalExportBatch(hash("political-batch-v1\n${plan.id}\n$index\n${parts.joinToString { it.id }}"), parts)
-                })
+                }, ownerUserId = ownerId)
             val secret = if (pending.settings.mode == "byok") pending.settings.apiKey else pending.settings.trialToken
             credentials.put(SECRET_REF, secret)
             try { persist(task) } catch (error: Exception) { credentials.remove(SECRET_REF); throw error }
@@ -196,8 +222,10 @@ class PoliticalExportManager internal constructor(
         ready.await()
         mutex.withLock {
             require(worker?.isActive != true) { "检查正在停止，请稍后继续" }
-            val task = current().forExplicitResume(retryUncertain)
-            require(credentials.get(SECRET_REF).isNotBlank()) { "原服务凭据不可用；已保留原文和检查结果。" }
+            val original = current()
+            val secret = politicalResumeCredential(original, accountSession, credentials.get(SECRET_REF))
+            val task = original.forExplicitResume(retryUncertain)
+            credentials.put(SECRET_REF, secret)
             persist(task)
             launchLocked()
         }
@@ -226,7 +254,11 @@ class PoliticalExportManager internal constructor(
             for (batch in task.batches.filter { !it.completed && it.remoteJobId.isNotEmpty() &&
                 it.remoteStatus !in setOf("completed", "failed", "cancelled", "uncertain", "expired") }) {
                 try {
-                    val remote = SummaryNetwork.cancel(withSecret(task), batch.remoteJobId)
+                    val settings = mutex.withLock {
+                        val secret = politicalReadCredential(task, accountSession, credentials.get(SECRET_REF))
+                        task.settings.copy(trialToken = secret)
+                    }
+                    val remote = SummaryNetwork.cancel(settings, batch.remoteJobId)
                     mutex.withLock { updateBatch(task.id, batch.id) { it.copy(remoteStatus = remote.status) } }
                     if (remote.status == "completed") saveResults(task.id, batch, remote.entries)
                 } catch (cancelled: CancellationException) { throw cancelled }
@@ -356,6 +388,11 @@ class PoliticalExportManager internal constructor(
                     throw SummaryFailure("服务预算已变化，已保留原检查。请结束后查看新的预计次数再检查。", ambiguous = false)
                 markStarted(task.id, batch.id)
             }
+            mutex.withLock {
+                val current = current()
+                if (current.id != task.id || current.status != "running") throw CancellationException()
+                requirePoliticalSubmission(task, batch, settings, accountSession)
+            }
             val submitted = SummaryNetwork.submitPolitical(settings, PoliticalFilterProtocol.messages(batch.parts),
                 "${task.id}:${batch.id}:${batch.attempt}")
             withContext(NonCancellable) { mutex.withLock {
@@ -383,6 +420,10 @@ class PoliticalExportManager internal constructor(
     private suspend fun markStarted(taskId: String, batchId: String) = mutex.withLock {
         val task = current()
         if (task.id != taskId || task.status != "running") throw CancellationException()
+        if (task.settings.mode == "companion") {
+            val batch = task.batches.first { it.id == batchId }
+            requirePoliticalSubmission(task, batch, withSecret(task), accountSession)
+        }
         updateBatch(taskId, batchId) { it.copy(started = true) }
     }
 
@@ -460,11 +501,79 @@ internal fun politicalSettings(settings: ServiceSettings, quota: CompanionQuota?
     return cleaned
 }
 
+internal fun PoliticalExportTask.afterAccountLogout(): PoliticalExportTask =
+    if (settings.mode != "companion" || status !in setOf("queued", "running")) this else copy(
+        status = "paused", message = "账户已退出，后续检查已暂停。已完成结果和原请求编号仍保留，请登录原账户后继续。",
+    )
+
+internal fun politicalOwnerForNewTask(settings: ServiceSettings, session: AccountSession?): String? {
+    if (settings.mode != "companion") return null
+    require(session != null && !accountSessionExpired(session) &&
+        samePoliticalService(session.serviceUrl, settings.companionUrl) && session.token == settings.trialToken) {
+        "请先登录账户，再使用免费内容检查。"
+    }
+    return session.user.id
+}
+
+/** Explicit resume may rebind only a known owner's current login, never another account. */
+internal fun politicalResumeCredential(task: PoliticalExportTask, session: AccountSession?, originalSecret: String): String {
+    if (task.settings.mode == "byok") {
+        require(originalSecret.isNotBlank()) { "原服务凭据不可用；已保留原文和检查结果。" }
+        return originalSecret
+    }
+    if (task.ownerUserId != null) {
+        require(session != null && session.user.id == task.ownerUserId && !accountSessionExpired(session) &&
+            samePoliticalService(session.serviceUrl, task.settings.companionUrl)) {
+            "请登录创建此检查的原账户后继续。"
+        }
+        return session.token
+    }
+    require(originalSecret.isNotBlank()) { "旧检查的原服务凭据不可用；已保留原文和检查结果。" }
+    val firstPending = task.batches.firstOrNull { !it.completed }
+    require(firstPending != null && firstPending.started &&
+        firstPending.remoteStatus !in setOf("failed", "cancelled", "uncertain", "expired")) {
+        "旧检查的账户归属无法确认，只能查询已发出的原请求。可保留结果，重新登录后创建检查。"
+    }
+    return originalSecret
+}
+
+/** A current login of the same owner can read/cancel old work without rebinding future POSTs. */
+internal fun politicalReadCredential(task: PoliticalExportTask, session: AccountSession?, originalSecret: String): String {
+    if (task.settings.mode == "companion" && task.ownerUserId != null && session != null &&
+        session.user.id == task.ownerUserId && !accountSessionExpired(session) &&
+        samePoliticalService(session.serviceUrl, task.settings.companionUrl)) return session.token
+    require(originalSecret.isNotBlank()) { "原服务凭据不可用，已保留原请求编号。请登录原账户后继续。" }
+    return originalSecret
+}
+
+/** Old anonymous unknown POSTs can only recover their exact server-side idempotent job. */
+internal fun requirePoliticalSubmission(task: PoliticalExportTask, batch: PoliticalExportBatch,
+    settings: ServiceSettings, session: AccountSession?) {
+    if (settings.mode != "companion") return
+    if (task.ownerUserId == null) {
+        require(batch.started && batch.remoteJobId.isBlank() &&
+            batch.remoteStatus !in setOf("failed", "cancelled", "uncertain", "expired")) {
+            "旧检查只能查询原请求，不能使用后来的账户继续派发。"
+        }
+        return
+    }
+    require(session != null && session.user.id == task.ownerUserId && !accountSessionExpired(session) &&
+        samePoliticalService(session.serviceUrl, settings.companionUrl) && session.token == settings.trialToken) {
+        "账户登录已变化，请登录原账户后继续检查。"
+    }
+}
+
+private fun samePoliticalService(first: String, second: String): Boolean = runCatching {
+    SummaryNetwork.checkedBase(first).toString().trimEnd('/') == SummaryNetwork.checkedBase(second).toString().trimEnd('/')
+}.getOrDefault(false)
+
 /** Validate a local snapshot before it can produce a variant or resume a paid request. */
 internal fun validatePoliticalTask(task: PoliticalExportTask) {
     require(task.id.isNotBlank() && task.archiveId.isNotBlank() && task.originalText.isNotBlank() &&
         hash(task.originalText) == task.sourceFingerprint) { "检查记录与原文不匹配" }
     require(task.settings.apiKey.isEmpty() && task.settings.trialToken.isEmpty()) { "检查记录不应包含凭据" }
+    require(task.ownerUserId == null || (task.settings.mode == "companion" && task.ownerUserId.isNotBlank() &&
+        task.ownerUserId.length <= 200)) { "检查账户归属无效" }
     require(task.promptVersion == PoliticalFilterProtocol.PROMPT_VERSION && task.batches.isNotEmpty()) { "检查协议或分段无效" }
     require(task.status in setOf("queued", "running", "paused", "cancelled", "completed")) { "检查状态无效" }
     require(task.batches.map { it.id }.distinct().size == task.batches.size) { "检查分段编号重复" }

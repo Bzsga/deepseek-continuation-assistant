@@ -65,11 +65,22 @@ class RedeemRequest(BaseModel):
     code: str = Field(min_length=4, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
 
 
+class AccountLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    username: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=128, repr=False)
+
+
+class AccountRegisterRequest(AccountLoginRequest):
+    invitation_code: str | None = Field(default=None, max_length=128, repr=False)
+
+
 class AdminConfigPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     public_enabled: bool | None = None
     daily_limit: int | None = Field(default=None, ge=0, le=1_000_000)
     user_daily_limit: int | None = Field(default=None, ge=0, le=1_000_000)
+    public_registration_limit: int | None = Field(default=None, ge=0, le=1_000_000)
     model: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = Field(default=None, min_length=1, max_length=2048)
     api_key: str | None = Field(default=None, max_length=4096)

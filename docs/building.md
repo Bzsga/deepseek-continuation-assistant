@@ -1,6 +1,6 @@
 # 构建与安装
 
-源码版本见 `android/app/build.gradle.kts`。当前 Android 源码为 1.0.15 / versionCode 24，最低 Android 8.0（API 26），compile/target SDK 为 35。
+源码版本见 `android/app/build.gradle.kts`。当前 Android 源码为 1.0.16 / versionCode 25，最低 Android 8.0（API 26），compile/target SDK 为 35。
 
 ## Android 环境
 
@@ -23,7 +23,7 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
 已有不同签名的同包名应用不能被此包覆盖。保留原版数据时，应先备份，或为开发版本设置不同 applicationId 后并行安装。
 
-备份恢复需使用兼容版本：1.0.15 继续写出格式 6，含新版 v1.7 或 v1.8 整理任务时需用 1.0.13 或更新版本恢复；当前源码读取格式 1–6。交流方式、原话选择、重新整理和手动修改保护规则见[续聊功能说明](conversation-continuity.md)。
+备份恢复需使用兼容版本：1.0.16 继续写出格式 6，含新版 v1.7 或 v1.8 整理任务时需用 1.0.13 或更新版本恢复；含账户任务请用 1.0.16 或更新版本，以保留任务账户归属，并登录同一账户后恢复。密码与账户会话不进入备份。当前源码读取格式 1–6，Room结构仍为2。交流方式、原话选择、重新整理和手动修改保护规则见[续聊功能说明](conversation-continuity.md)。
 
 PowerShell 也可使用仓库脚本；尖括号为需要替换的工具路径：
 

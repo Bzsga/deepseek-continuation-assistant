@@ -76,6 +76,7 @@ fun ContinuationApp(
     var importTargetArchiveId by rememberSaveable { mutableStateOf<String?>(null) }
     var advancedBranchId by rememberSaveable { mutableStateOf<String?>(null) }
     var serviceReturn by rememberSaveable { mutableStateOf("prepare") }
+    var accountReturn by rememberSaveable { mutableStateOf("settings") }
     var developerReturn by rememberSaveable { mutableStateOf("settings") }
     var preparationError by rememberSaveable { mutableStateOf<String?>(null) }
     var progressError by rememberSaveable { mutableStateOf<String?>(null) }
@@ -155,8 +156,29 @@ fun ContinuationApp(
                 "progress"
             else "result"
     }
+    fun account(returnRoute: String) {
+        accountReturn = returnRoute
+        route = "account"
+    }
+    fun requireFreeAccount(returnRoute: String): Boolean {
+        val current = controller.state.value
+        if (current.settings.mode == "companion" && current.account.currentUser == null) {
+            account(returnRoute)
+            return false
+        }
+        return true
+    }
+    fun openPoliticalExport(id: String) {
+        val current = controller.state.value
+        val saved = controller.politicalExport.state.value.task?.takeIf { it.archiveId == id }
+        val requiresLogin = if (saved != null) saved.settings.mode == "companion" && saved.status != "completed"
+            else current.settings.mode == "companion"
+        if (requiresLogin && current.account.currentUser == null) account(route)
+        else politicalArchiveId = id
+    }
     fun requestReorganization(id: String, confirmedScopes: List<ArchiveSourceScope>? = null) {
         if (submitting || reorganizationLoading) return
+        if (!requireFreeAccount(route)) return
         reorganizationLoading = true
         reorganizationError = null
         reorganizationSourceId = id
@@ -224,6 +246,7 @@ fun ContinuationApp(
                 }
                 "prepare" -> if (batchIds.size > 1) "choose" else "home"
                 "service" -> serviceReturn
+                "account" -> accountReturn
                 "developer" -> developerReturn
                 "about" -> "settings"
                 "feedback" -> "settings"
@@ -234,6 +257,7 @@ fun ContinuationApp(
     }
     fun begin(conversation: ImportedConversation, choice: PreparationChoice, smart: Boolean) {
         if (submitting) return
+        if (smart && !requireFreeAccount("prepare")) return
         submitting = true
         preparationError = null
         progressError = null
@@ -315,9 +339,10 @@ fun ContinuationApp(
             snackbars.showSnackbar(it)
         }
     }
-    LaunchedEffect(route, state.settings.mode, state.settings.companionUrl, aiRequest?.archiveId) {
+    LaunchedEffect(route, state.settings.mode, state.settings.companionUrl,
+        state.account.currentUser?.id, aiRequest?.archiveId) {
         if (
-            state.settings.mode == "companion" &&
+            state.settings.mode == "companion" && state.account.currentUser != null &&
                 (route in setOf("home", "prepare", "settings", "service") || aiRequest != null)
         ) {
             run { controller.refreshQuota() }
@@ -490,6 +515,7 @@ fun ContinuationApp(
                                 "about" -> "关于"
                                 "paste" -> "粘贴聊天内容"
                                 "service" -> "整理服务"
+                                "account" -> "账户"
                                 "developer" -> "开发者选项"
                                 "feedback" -> "意见信箱"
                                 else -> "Deepseek续聊助手"
@@ -693,6 +719,7 @@ fun ContinuationApp(
                                             }
                                         },
                                         onService = { service("prepare") },
+                                        onAccount = { account("prepare") },
                                         onQuotaRefresh = { run { controller.refreshQuota() } },
                                         estimateMessages = controller::estimateForCurrentService,
                                         onAdvanced = {
@@ -710,6 +737,8 @@ fun ContinuationApp(
                                     run,
                                     onPrepare = { prepareCurrentRecord() },
                                     onService = { service("progress") },
+                                    needsLogin = currentTask?.serviceMode == "companion" && state.account.currentUser == null,
+                                    onAccount = { account("progress") },
                                     onRebuild = {
                                         run {
                                             currentTask?.let { controller.cancelTask(it.id) }
@@ -775,7 +804,7 @@ fun ContinuationApp(
                                         busy = busy,
                                         onReorganize = { requestReorganization(archive.id) },
                                         onOpenRecord = { openRecord(it) },
-                                        onPoliticalExport = { politicalArchiveId = archive.id },
+                                        onPoliticalExport = { openPoliticalExport(archive.id) },
                                         onRepair = { repairArchiveId = archive.id },
                                         onAddRecent = { route = "add_recent" },
                                     )
@@ -810,7 +839,7 @@ fun ContinuationApp(
                                         busy,
                                         initialBranchId = advancedBranchId,
                                     ) { title, branch, ids, background, target, ai ->
-                                        if (!submitting) {
+                                        if (!submitting && (!ai || requireFreeAccount("selection"))) {
                                             submitting = true
                                             run {
                                                 try {
@@ -874,7 +903,7 @@ fun ContinuationApp(
                                         { route = "archives" },
                                         onReorganize = { requestReorganization(archive.id) },
                                         onOpenRecord = { openRecord(it) },
-                                        onPoliticalExport = { politicalArchiveId = archive.id },
+                                        onPoliticalExport = { openPoliticalExport(archive.id) },
                                         onRepair = { repairArchiveId = archive.id },
                                         onAddRecent = { route = "add_recent" },
                                     )
@@ -910,6 +939,7 @@ fun ContinuationApp(
                                         route = "developer"
                                     },
                                     onFeedback = { route = "feedback" },
+                                    onAccount = { account(route) },
                                     setupOnly = route == "service",
                                     onReady = {
                                         preparationError = null
@@ -922,7 +952,10 @@ fun ContinuationApp(
                                 )
                             "developer" -> DeveloperScreen(state, controller, run)
                             "feedback" -> FeedbackScreen(state, controller, run)
-                            "tasks" -> TasksScreen(state.tasks, controller, run) { openRecord(it) }
+                            "tasks" -> TasksScreen(state.tasks, controller, run,
+                                onAccount = { account("tasks") }) { openRecord(it) }
+                            "account" -> AccountScreen(state, busy, controller, run,
+                                onSignedIn = { route = accountReturn })
                             "about" ->
                                 AboutScreen(
                                     updateState = updateState,
@@ -1121,7 +1154,8 @@ fun ContinuationApp(
                 onQuotaRefresh = { run { controller.refreshQuota() } },
                 onSettings = {
                     aiRequest = null
-                    service("archive")
+                    if (state.settings.mode == "companion" && state.account.currentUser == null) account("archive")
+                    else service("archive")
                 },
             ) {
                 if (!submitting) {
@@ -1362,9 +1396,10 @@ private fun OrganizationDialog(
     val configured =
         if (settings.mode == "byok") settings.apiKey.isNotBlank() && settings.baseUrl.isNotBlank()
         else settings.companionUrl.isNotBlank()
+    val needsLogin = settings.mode == "companion" && state.account.currentUser == null
     val quotaReady =
         settings.mode != "companion" ||
-            (state.quota != null && !state.quotaLoading && state.quotaError == null)
+            (!needsLogin && state.quota != null && !state.quotaLoading && state.quotaError == null)
     AppDialog(
         "确认 AI 整理",
         onDismiss,
@@ -1373,7 +1408,7 @@ private fun OrganizationDialog(
                 TextButton(onClick = onDismiss) { Text("返回档案") }
                 if (configured && estimate?.isSuccess == true && quotaReady)
                     Button(onClick = onConfirm) { Text("确认并开始") }
-                else Button(onClick = onSettings) { Text("前往服务设置") }
+                else Button(onClick = onSettings) { Text(if (needsLogin) "登录后免费整理" else "前往服务设置") }
             }
         },
     ) {
@@ -1394,7 +1429,7 @@ private fun OrganizationDialog(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (settings.mode == "companion")
-                    Text("免费使用，预计需要 ${state.quota.requestCountText(value.chunks)} 次模型请求，服务端会检查个人与全站剩余次数。")
+                    Text("免费使用，预计需要 ${state.quota.requestCountText(value.chunks)} 次模型请求，将按实际请求扣除个人次数。")
                 else if (value.estimatedCost != null)
                     Text("按填写单价保守估算约 ${"%.4f".format(value.estimatedCost)}（与单价同币种）。实际费用以服务商账单为准。")
                 else Text("尚未填写单价，无法估算费用。该服务会按实际使用计费，可在设置中补充价格。")

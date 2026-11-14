@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -36,7 +37,8 @@ async def service(settings):
 
 
 async def authorization(client):
-    response = await client.post("/v1/sessions")
+    response = await client.post("/v1/accounts/register", json={
+        "username": "runner_" + uuid.uuid4().hex[:20], "password": "synthetic password 123"})
     assert response.status_code == 200
     return {"Authorization": "Bearer " + response.json()["token"]}
 

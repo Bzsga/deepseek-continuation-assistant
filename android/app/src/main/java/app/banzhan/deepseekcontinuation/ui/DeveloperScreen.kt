@@ -13,6 +13,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -33,12 +36,15 @@ internal fun DeveloperScreen(
     var days by rememberSaveable { mutableIntStateOf(7) }
     val signedIn = prefs.sessionToken.isNotBlank()
     val hideManagementHeader =
-        WindowInsets.isImeVisible && page in setOf("server", "local", "feedback")
+        WindowInsets.isImeVisible && page in setOf("users", "server", "local", "feedback")
     LaunchedEffect(signedIn, prefs.serviceUrl, prefs.sessionToken, page, days) {
         if (signedIn) {
             when (page) {
                 "overview" -> run { controller.refreshAdminStats(days) }
-                "users" -> run { controller.refreshAdminUsers(limit = 25, offset = 0) }
+                "users" -> run {
+                    controller.refreshAdminConfig()
+                    controller.refreshAdminUsers(limit = 25, offset = 0)
+                }
                 "server" -> run { controller.refreshAdminConfig() }
             }
         }
@@ -130,7 +136,7 @@ internal fun DeveloperScreen(
                 ActionRow {
                     listOf(
                             "overview" to "统计概览",
-                            "users" to "匿名用户",
+                            "users" to "用户与注册",
                             "feedback" to "意见审批",
                             "server" to "服务器",
                             "local" to "本机参数",
@@ -152,6 +158,8 @@ internal fun DeveloperScreen(
                 "users" ->
                     AdminUsers(
                         state,
+                        controller,
+                        run,
                         onPage = { offset ->
                             run { controller.refreshAdminUsers(limit = 25, offset = offset) }
                         },
@@ -259,18 +267,61 @@ private fun AdminOverview(
 }
 
 @Composable
-private fun AdminUsers(state: AppState, onPage: (Int) -> Unit) {
+private fun AdminUsers(
+    state: AppState,
+    controller: AppController,
+    run: (suspend () -> Unit) -> Unit,
+    onPage: (Int) -> Unit,
+) {
     val page = state.adminUsers
+    var invitationsExpanded by rememberSaveable { mutableStateOf(false) }
+    var invitationCount by rememberSaveable { mutableIntStateOf(10) }
+    LaunchedEffect(invitationsExpanded) {
+        if (invitationsExpanded) run { controller.refreshAdminRegistrationInvites() }
+    }
     LazyColumn(
-        Modifier.fillMaxSize(),
+        Modifier.fillMaxSize().imePadding(),
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
+            RegistrationSettingsCard(state.adminConfig, state.adminLoading) { updated ->
+                run {
+                    controller.updateAdminConfig(updated)
+                    controller.refreshAdminUsers(limit = page?.limit ?: 25, offset = page?.offset ?: 0)
+                }
+            }
+        }
+        state.adminError?.let { item { NoticeCard(it) } }
+        item {
+            RegistrationInvitationControls(
+                expanded = invitationsExpanded,
+                loading = state.adminRegistrationLoading,
+                onToggle = { invitationsExpanded = !invitationsExpanded; invitationCount = 10 },
+                onRefresh = { run { controller.refreshAdminRegistrationInvites() } },
+                onCreate = { count, days -> run { controller.createAdminRegistrationInvites(count, days) } },
+            )
+        }
+        if (invitationsExpanded) {
+            state.adminRegistrationError?.let { item { NoticeCard(it) } }
+            val invitations = state.adminRegistrationInvites?.filter { it.usedAt == null }.orEmpty()
+            if (state.adminRegistrationInvites != null && invitations.isEmpty())
+                item { Text("还没有未使用的邀请码。", style = MaterialTheme.typography.bodySmall) }
+            items(invitations.take(invitationCount), key = { "invite:${it.id}" }) { invitation ->
+                RegistrationInvitationCard(invitation)
+            }
+            if (invitations.size > invitationCount) item {
+                TextButton(onClick = { invitationCount += 10 }) { Text("显示更多邀请码") }
+            }
+        }
+        item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("匿名用户使用情况", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                Text("注册用户", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                 TextButton(
-                    onClick = { onPage(page?.offset ?: 0) },
+                    onClick = { run {
+                        controller.refreshAdminConfig()
+                        controller.refreshAdminUsers(limit = page?.limit ?: 25, offset = page?.offset ?: 0)
+                    } },
                     enabled = !state.adminUsersLoading,
                 ) {
                     Text("刷新")
@@ -286,36 +337,9 @@ private fun AdminUsers(state: AppState, onPage: (Int) -> Unit) {
                 item { NoticeCard("尚未加载用户列表。") }
         } else {
             if (page.users.isEmpty()) item { NoticeCard("这一页没有用户记录。") }
-            items(page.users, key = { it.id }) { user ->
-                var expanded by remember(user.id) { mutableStateOf(false) }
-                AdminSection("匿名用户 ${user.id.take(12)}") {
-                    MetricRow("今日剩余 / 上限", "${user.dailyRemaining} / ${user.dailyLimit}")
-                    MetricRow("今日已用 / 排队预留", "${user.dailyUsed} / ${user.dailyReserved}")
-                    Text(
-                        "最近活跃 · ${user.lastSeenAt?.let(::readableServerTime) ?: "未提供"}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    TextButton(onClick = { expanded = !expanded }) {
-                        Text(if (expanded) "收起详情" else "查看详情")
-                    }
-                    if (expanded) {
-                        SelectionContainer {
-                            Text(user.id, style = MaterialTheme.typography.bodySmall)
-                        }
-                        Text(
-                            "注册时间 · ${readableServerTime(user.createdAt)}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        MetricRow(
-                            "访问方式",
-                            if (user.accessMode == "public") "匿名免费" else user.accessMode,
-                        )
-                        MetricRow("累计请求", user.totalRequests.toString())
-                        MetricRow("完成 / 失败", "${user.completed} / ${user.failed}")
-                        MetricRow("不确定 / 取消", "${user.uncertain} / ${user.cancelled}")
-                        MetricRow("已报告输入 / 输出 tokens", "${user.inputTokens} / ${user.outputTokens}")
-                        MetricRow("用量未知的请求", user.usageUnknownRequests?.toString() ?: "未提供")
-                    }
+            items(page.users.filter { !it.username.isNullOrBlank() }, key = { it.id }) { user ->
+                RegisteredUserQuotaCard(user, state.adminConfig?.userDailyLimit, state.adminUsersLoading) { limit, remaining ->
+                    run { controller.updateAdminUserQuota(user.id, limit, remaining, page.day.takeIf { remaining != null }) }
                 }
             }
             item {
@@ -340,6 +364,151 @@ private fun AdminUsers(state: AppState, onPage: (Int) -> Unit) {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun RegistrationSettingsCard(config: AdminConfig?, loading: Boolean, onSave: (AdminConfig) -> Unit) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    var capacity by remember(config) { mutableStateOf(config?.publicRegistrationLimit?.toString().orEmpty()) }
+    var defaultLimit by remember(config) { mutableStateOf(config?.userDailyLimit?.toString().orEmpty()) }
+    var problem by remember { mutableStateOf<String?>(null) }
+    AdminSection("注册与默认次数") {
+        if (config == null) {
+            Text(if (loading) "正在读取设置…" else "尚未读取注册设置。", style = MaterialTheme.typography.bodySmall)
+        } else {
+            MetricRow("公开注册人数 / 上限", "${config.publicRegisteredCount} / ${config.publicRegistrationLimit}")
+            Text("默认每人每日 ${config.userDailyLimit} 次 · 邀请注册不占公开名额", style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag("admin-registration-toggle")) {
+                Text(if (expanded) "收起设置" else "调整名额与默认次数")
+            }
+            if (expanded) {
+                NumberField("公开注册人数上限", capacity, !loading) { capacity = it }
+                NumberField("默认每人每日免费次数", defaultLimit, !loading) { defaultLimit = it }
+                Text("新老账号均适用，个人单独设置优先。", style = MaterialTheme.typography.bodySmall)
+                problem?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                Button(
+                    onClick = {
+                        try {
+                            val cap = requireNotNull(capacity.toIntOrNull()?.takeIf { it in 0..1_000_000 }) { "公开人数上限应为0到1000000之间的整数。" }
+                            val limit = requireNotNull(defaultLimit.toIntOrNull()?.takeIf { it in 0..1_000_000 }) { "默认次数应为0到1000000之间的整数。" }
+                            problem = null
+                            onSave(config.copy(publicRegistrationLimit = cap, userDailyLimit = limit))
+                        } catch (error: IllegalArgumentException) { problem = error.message }
+                    },
+                    enabled = !loading,
+                    modifier = Modifier.testTag("admin-registration-save"),
+                ) { Text("保存注册设置") }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun RegisteredUserQuotaCard(
+    user: UserUsage,
+    defaultLimit: Int?,
+    loading: Boolean,
+    onSave: (Int?, Int?) -> Unit,
+) {
+    var expanded by rememberSaveable(user.id) { mutableStateOf(false) }
+    var followDefault by remember(user) { mutableStateOf(user.dailyLimitOverride == null) }
+    var limit by remember(user) { mutableStateOf((user.dailyLimitOverride ?: user.dailyLimit).toString()) }
+    var today by remember(user) { mutableStateOf("") }
+    var problem by remember { mutableStateOf<String?>(null) }
+    AdminSection(user.username ?: user.id.take(12)) {
+        MetricRow("今日剩余 / 每日上限", "${user.dailyRemaining} / ${user.dailyLimit}")
+        Text(
+            "${if (user.registrationKind == "invitation") "邀请码注册" else "公开注册"} · " +
+                if (user.dailyLimitOverride == null) "跟随默认次数" else "个人单独设置",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag("admin-user-toggle:${user.id}")) {
+            Text(if (expanded) "收起调整" else "调整免费次数")
+        }
+        if (expanded) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(followDefault, { followDefault = it }, enabled = !loading,
+                    modifier = Modifier.testTag("admin-user-follow-default:${user.id}"))
+                Text("跟随默认每日次数" + (defaultLimit?.let { "（$it 次）" } ?: ""),
+                    Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            }
+            if (!followDefault) NumberField("个人每日免费次数", limit, !loading) { limit = it }
+            NumberField("仅今天的剩余次数（选填）", today, !loading) { today = it }
+            Text("留空保留今日已用情况。已开始的请求与预留次数不会被取消。", style = MaterialTheme.typography.bodySmall)
+            problem?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Button(
+                onClick = {
+                    try {
+                        val personal = if (followDefault) null else requireNotNull(limit.toIntOrNull()?.takeIf { it in 0..1_000_000 }) { "个人次数应为0到1000000之间的整数。" }
+                        val remaining = if (today.isBlank()) null else requireNotNull(today.toIntOrNull()?.takeIf { it in 0..1_000_000 }) { "今日剩余应为0到1000000之间的整数。" }
+                        problem = null
+                        onSave(personal, remaining)
+                    } catch (error: IllegalArgumentException) { problem = error.message }
+                },
+                enabled = !loading,
+                modifier = Modifier.testTag("admin-user-save:${user.id}"),
+            ) { Text("保存个人次数") }
+            Text("今日已用 ${user.dailyUsed} 次 · 排队预留 ${user.dailyReserved} 次", style = MaterialTheme.typography.bodySmall)
+            SelectionContainer { Text("用户 ID · ${user.id}", style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+}
+
+@Composable
+internal fun RegistrationInvitationControls(
+    expanded: Boolean,
+    loading: Boolean,
+    onToggle: () -> Unit,
+    onRefresh: () -> Unit,
+    onCreate: (Int, Int) -> Unit,
+) {
+    var count by rememberSaveable { mutableStateOf("1") }
+    var days by rememberSaveable { mutableStateOf("7") }
+    var problem by remember { mutableStateOf<String?>(null) }
+    AdminSection("一次性注册邀请码") {
+        TextButton(onClick = onToggle, modifier = Modifier.testTag("admin-invitations-toggle")) {
+            Text(if (expanded) "收起邀请码" else "生成与查看未使用邀请码")
+        }
+        if (expanded) {
+            Text("每个邀请码可注册一个账户，不占公开名额。", style = MaterialTheme.typography.bodySmall)
+            NumberField("生成数量", count, !loading) { count = it }
+            NumberField("有效天数", days, !loading) { days = it }
+            problem?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            ActionRow {
+                Button(onClick = {
+                    try {
+                        val amount = requireNotNull(count.toIntOrNull()?.takeIf { it in 1..100 }) { "每次可生成1到100个邀请码。" }
+                        val duration = requireNotNull(days.toIntOrNull()?.takeIf { it in 1..365 }) { "有效天数应为1到365天。" }
+                        problem = null
+                        onCreate(amount, duration)
+                    } catch (error: IllegalArgumentException) { problem = error.message }
+                }, enabled = !loading, modifier = Modifier.testTag("admin-invitations-create")) { Text("生成邀请码") }
+                TextButton(onClick = onRefresh, enabled = !loading) { Text("刷新列表") }
+            }
+            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+internal fun RegistrationInvitationCard(invitation: AdminRegistrationInvite) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember(invitation.code) { mutableStateOf(false) }
+    Surface(shape = MaterialTheme.shapes.medium) {
+        Column(Modifier.fillMaxWidth().padding(18.dp).testTag("admin-invitation:${invitation.id}"),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!invitation.code.isNullOrBlank()) {
+                SelectionContainer { Text(invitation.code, style = MaterialTheme.typography.bodyMedium) }
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(invitation.code))
+                    copied = true
+                }, modifier = Modifier.testTag("admin-invitation-copy:${invitation.id}")) { Text(if (copied) "已复制" else "复制邀请码") }
+            } else Text("这条邀请码未提供完整内容，请刷新列表。", style = MaterialTheme.typography.bodySmall)
+            Text("到期时间 · ${readableServerTime(invitation.expiresAt)}", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -411,7 +580,8 @@ private fun RemoteConfigEditor(
         )
         SettingToggle("免费服务总开关", publicEnabled, canSave) { publicEnabled = it }
         NumberField("全站每日模型请求上限", dailyLimit, canSave) { dailyLimit = it }
-        NumberField("每个匿名用户每日请求上限", userLimit, canSave) { userLimit = it }
+        NumberField("默认每人每日免费次数", userLimit, canSave) { userLimit = it }
+        Text("新老账号均适用，个人单独设置优先。", style = MaterialTheme.typography.bodySmall)
         HorizontalDivider()
         SectionTitle("上游模型")
         SettingToggle("启用上游 API", apiEnabled, canSave) { apiEnabled = it }

@@ -73,7 +73,7 @@ data class CompanionQuota(
             if (dailyRemaining == null || userDailyRemaining == null || dailyRemaining < 0 || userDailyRemaining < 0) {
                 return "免费整理次数信息不完整，请刷新后再试"
             }
-            if (dailyRemaining == 0) return "今日免费整理总次数已用完，请明天再试"
+            if (dailyRemaining == 0) return "免费智能整理暂时不可用，请稍后再试"
             if (userDailyRemaining == 0) return "你今日的免费整理次数已用完，请明天再试"
             return null
         }
@@ -232,7 +232,6 @@ object SummaryNetwork {
         return buildList {
             if (quota.accessMode == "public") {
                 add(if (quota.enabled) "免费整理已开放" else "免费整理暂未开放")
-                quota.dailyRemaining?.let { add("今日全站剩余 ${it} 次") }
                 quota.userDailyRemaining?.let { add("今日个人剩余 ${it} 次") }
             } else {
                 add(if (quota.enabled) "试用服务已启用" else "试用服务暂不可用")

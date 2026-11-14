@@ -16,6 +16,7 @@ from app.main import create_app
 from app.provider import ProviderOutcome, snapshot_for
 from app.schemas import JobRequest
 from app.store import digest
+from account_fixtures import registered_session
 
 
 PRIMARY = [{"id": "current", "role": "user", "content": "我改主意了，小说里的阿遥最终没有离开。"}]
@@ -35,7 +36,7 @@ def payload(key="reference-job-0001", *, context=CONTEXT):
 
 
 def session(client):
-    result = client.post("/v1/sessions").json()
+    result = registered_session(client)
     return {"Authorization": "Bearer " + result["token"]}
 
 

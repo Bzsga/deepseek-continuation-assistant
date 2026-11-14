@@ -8,6 +8,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.banzhan.deepseekcontinuation.core.*
 import app.banzhan.deepseekcontinuation.data.AppState
+import app.banzhan.deepseekcontinuation.data.AccountState
+import app.banzhan.deepseekcontinuation.data.AccountUser
 import app.banzhan.deepseekcontinuation.data.OrganizationEstimate
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
@@ -163,13 +165,15 @@ class ContinuityStageUiTest {
         compose.setContent {
             ContinuationTheme {
                 PreparationScreen(
-                    fixture.conversation, AppState(quotaError = "合成：整理服务暂时不可用"), false, null,
+                    fixture.conversation, AppState(quotaError = "合成：整理服务暂时不可用",
+                        account = AccountState(AccountUser("synthetic", "synthetic", "public", "2026-11-14T00:00:00Z"))), false, null,
                     onStart = { starts++ }, onOriginal = {}, onService = {}, onQuotaRefresh = {},
                     estimateMessages = { OrganizationEstimate(2, 100, 50, null) },
                     onAdvanced = {}, onSavedTask = {}, onQuick = selection::set,
                 )
             }
         }
+        scrollToLazyText("改用智能整理").performClick()
         scrollToLazyText("开始智能整理").assertIsNotEnabled()
         scrollToLazyText("先快速接续").assertIsEnabled().performClick()
         compose.runOnIdle {

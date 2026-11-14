@@ -80,6 +80,7 @@ class Settings:
     public_enabled: bool = True
     daily_limit: int = 50
     user_daily_limit: int = 5
+    public_registration_limit: int = 20
     admin_token: str = field(default="", repr=False)
     admin_password_hash: str = field(default="", repr=False)
     feedback_worker_token: str = field(default="", repr=False)
@@ -162,6 +163,8 @@ class Settings:
             raise ValueError("FAILURE_ARTIFACTS_TTL_HOURS 须为 1 到 168 的整数")
         if not 0 <= self.daily_limit <= 1_000_000 or not 0 <= self.user_daily_limit <= 1_000_000:
             raise ValueError("每日次数上限须在 0 到 1000000 之间")
+        if type(self.public_registration_limit) is not int or not 0 <= self.public_registration_limit <= 1_000_000:
+            raise ValueError("公开注册人数上限须在 0 到 1000000 之间")
         if not self.model.strip() or len(self.model) > 128 or any(character.isspace() for character in self.model):
             raise ValueError("模型名称须为 1 到 128 个非空白字符")
         if len(self.api_key) > 4096 or "\n" in self.api_key or "\r" in self.api_key:

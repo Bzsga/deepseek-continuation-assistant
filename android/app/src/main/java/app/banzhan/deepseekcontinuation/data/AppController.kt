@@ -67,6 +67,7 @@ class AppController internal constructor(application: Application, databaseName:
     private val adminMutex = Mutex()
     private val adminStatsMutex = Mutex()
     private val adminUsersMutex = Mutex()
+    private val adminRegistrationMutex = Mutex()
     private val connectionTestMutex = Mutex()
     private val feedbackSubmitMutex = Mutex()
     private val feedbackImageMutex = Mutex()
@@ -80,6 +81,9 @@ class AppController internal constructor(application: Application, databaseName:
     private val ready = CompletableDeferred<Unit>()
     private val jobs = ConcurrentHashMap<String, Job>()
     internal var organizationNetwork: OrganizationNetwork = LiveOrganizationNetwork
+    internal var accountNetwork: AccountTransport = AccountNetwork
+    // Session credentials are independent of service settings and never enter archive backups.
+    @Volatile private var currentAccount: AccountSession? = null
     private val activeOperations = AtomicInteger()
     private var clearingData = false
     // Guarded by mutex. A cancelled Room return can follow a successful commit;
@@ -118,7 +122,18 @@ class AppController internal constructor(application: Application, databaseName:
                     } catch (error: Exception) {
                         mutableState.update { it.copy(adminError = "管理登录信息无法读取，请重新登录。") }
                     }
-                    mutableState.update { it.copy(settings = settings, developerPrefs = developer) }
+                    var accountError: String? = null
+                    try {
+                        currentAccount = credentials.get("current_account").takeIf { it.isNotBlank() }
+                            ?.let { appJson.decodeFromString<AccountSession>(it) }
+                            ?.takeUnless { accountSessionExpired(it) }
+                        if (currentAccount == null) credentials.remove("current_account")
+                    } catch (_: Exception) {
+                        accountError = "账户登录信息无法读取，请重新登录。"
+                    }
+                    politicalExport.setAccountSession(currentAccount)
+                    mutableState.update { it.copy(settings = settings, developerPrefs = developer,
+                        account = AccountState(currentAccount?.user, error = accountError)) }
                     database.withTransaction {
                         dao.tasks().forEach { row ->
                             val task = row.decodeTask()
@@ -190,11 +205,123 @@ class AppController internal constructor(application: Application, databaseName:
     suspend fun saveSettings(settings: ServiceSettings) = operation {
         mutex.withLock {
             val cleaned = settingsForSave(state.value.settings, settings)
+            if (cleaned.companionUrl != state.value.settings.companionUrl) clearAccountLocked()
             storeSettings(cleaned)
             val changed = cleaned.apiKey != settings.apiKey.trim() || cleaned.trialToken != settings.trialToken.trim()
             mutableState.update { it.copy(settings = cleaned, quota = null, quotaError = null, quotaLoading = false,
                 myFeedback = null, myFeedbackError = null,
                 notice = if (changed) "地址已修改，旧凭据已清空。已有任务保留原服务。" else "服务设置已保存，已有任务继续使用创建时的服务") }
+        }
+    }
+
+    suspend fun registerAccount(username: String, password: String, invitationCode: String? = null) =
+        authenticateAccount { service -> accountNetwork.register(service, username, password, invitationCode) }
+
+    suspend fun loginAccount(username: String, password: String) =
+        authenticateAccount { service -> accountNetwork.login(service, username, password) }
+
+    private suspend fun authenticateAccount(action: suspend (String) -> AccountAuthentication) = withContext(Dispatchers.IO) {
+        ready.await()
+        sessionMutex.withLock {
+            val service = state.value.settings.companionUrl
+            mutableState.update { it.copy(account = it.account.copy(loading = true, error = null)) }
+            try {
+                require(currentAccount == null || accountSessionExpired(currentAccount!!)) { "请先退出当前账户再切换。" }
+                val result = action(service)
+                require(!accountSessionExpired(result.session)) { "服务返回的登录会话已过期，请重新登录。" }
+                mutex.withLock {
+                    require(state.value.settings.companionUrl == service) { "服务地址已改变，请在当前地址重新登录。" }
+                    credentials.put("current_account", appJson.encodeToString(result.session))
+                    currentAccount = result.session
+                    politicalExport.setAccountSession(result.session)
+                    mutableState.update { it.copy(account = AccountState(result.session.user), quota = result.quota,
+                        quotaLoading = false, quotaError = null) }
+                }
+            } catch (error: Exception) {
+                if (error !is CancellationException) mutableState.update {
+                    it.copy(account = it.account.copy(error = error.message ?: "账户登录失败，请稍后再试。"))
+                }
+                throw error
+            } finally { mutableState.update { it.copy(account = it.account.copy(loading = false)) } }
+        }
+    }
+
+    suspend fun refreshAccount() = withContext(Dispatchers.IO) {
+        ready.await()
+        sessionMutex.withLock {
+            val session = requireAccountSession()
+            mutableState.update { it.copy(account = it.account.copy(loading = true, error = null)) }
+            try {
+                val profile = accountNetwork.me(session)
+                mutex.withLock {
+                    if (currentAccount != session) throw CancellationException("账户状态已改变")
+                    val updated = session.copy(user = profile.user)
+                    credentials.put("current_account", appJson.encodeToString(updated))
+                    currentAccount = updated
+                    politicalExport.setAccountSession(updated)
+                    mutableState.update { it.copy(account = AccountState(profile.user), quota = profile.quota,
+                        quotaLoading = false, quotaError = null) }
+                }
+            } catch (error: Exception) {
+                handleAccountFailure(session.token, error)
+                if (error !is CancellationException) mutableState.update {
+                    it.copy(account = it.account.copy(error = error.message ?: "账户信息读取失败。"))
+                }
+                throw error
+            } finally { mutableState.update { it.copy(account = it.account.copy(loading = false)) } }
+        }
+    }
+
+    suspend fun logoutAccount() = withContext(Dispatchers.IO) {
+        ready.await()
+        sessionMutex.withLock {
+            val (session, taskIds) = mutex.withLock {
+                val session = currentAccount
+                clearAccountLocked()
+                val tasks = if (session == null) emptyList() else dao.tasks().map { it.decodeTask() }.filter {
+                    it.ownerUserId == session.user.id && it.settings.companionUrl == session.serviceUrl &&
+                        (it.status in setOf("queued", "running") || jobs[it.id]?.isCompleted == false)
+                }
+                // Close admission for the whole account before any task cancellation yields.
+                tasks.forEach { saveTask(it.withoutInFlight().copy(status = "paused",
+                    uncertain = it.uncertain || it.hasUncertainRequest(), message = "已退出账户，进度已保留；登录同一账户后可继续。")) }
+                tasks.forEach { jobs[it.id]?.cancel() }
+                refresh()
+                mutableState.update { it.copy(account = it.account.copy(loading = true)) }
+                session to tasks.map { it.id }
+            }
+            try {
+                politicalExport.suspendAccountTasks()
+                taskIds.forEach { jobs[it]?.cancelAndJoin() }
+                if (session != null) accountNetwork.logout(session)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                mutableState.update { it.copy(account = AccountState(error =
+                    "已退出本机，暂未确认服务器的退出结果。需要续整理时，请登录同一账户。")) }
+            } finally { mutableState.update { it.copy(account = it.account.copy(loading = false)) } }
+        }
+    }
+
+    private suspend fun clearAccountLocked(message: String? = null) {
+        credentials.remove("current_account")
+        currentAccount = null
+        politicalExport.setAccountSession(null)
+        mutableState.update { it.copy(account = AccountState(error = message), quota = null,
+            quotaLoading = false, quotaError = message) }
+    }
+
+    private suspend fun requireAccountSession(): AccountSession = mutex.withLock {
+        val session = currentAccount
+        if (session == null || accountSessionExpired(session) || session.serviceUrl != state.value.settings.companionUrl) {
+            clearAccountLocked("请先登录账户，再使用免费智能整理。")
+            error("请先登录账户，再使用免费智能整理。")
+        }
+        session
+    }
+
+    private suspend fun handleAccountFailure(token: String, error: Exception) {
+        if (error is SummaryFailure && error.statusCode == 401) mutex.withLock {
+            if (currentAccount?.token == token) clearAccountLocked("账户登录已过期，请重新登录。")
         }
     }
 
@@ -300,30 +427,51 @@ class AppController internal constructor(application: Application, databaseName:
         }
         val snapshot = if (state.value.settings.mode == "companion") ensureCompanionIdentity() else state.value.settings
         val quota = if (snapshot.mode == "companion") refreshQuotaState() else null
-        require(state.value.settings == snapshot) { "服务设置已变化，请重新查看预计次数。" }
+        require(sameCurrentOrganizationSettings(snapshot)) { "服务设置已变化，请重新查看预计次数。" }
         politicalExport.prepare(archiveId, text, snapshot, quota)
     }
 
-    private suspend fun ensureCompanionIdentity(requireFreeMode: Boolean = true, diagnosticsOnly: Boolean = false): ServiceSettings = sessionMutex.withLock {
+    private suspend fun ensureCompanionIdentity(requireFreeMode: Boolean = true,
+        diagnosticsOnly: Boolean = false, allowLegacyCreate: Boolean = false): ServiceSettings {
         val snapshot = validateSettings(state.value.settings)
-        require(!diagnosticsOnly || DiagnosticPrivacy.usesCompanion(snapshot.mode, snapshot.companionUrl)) { "诊断服务设置已改变" }
-        require(!requireFreeMode || snapshot.mode == "companion") { "当前使用自己的 AI 服务。" }
-        val identityKey = companionIdentityKey(snapshot.companionUrl)
-        val existing = snapshot.trialToken.ifBlank { credentials.get(identityKey) }
-        val token = if (existing.isNotBlank()) existing else organizationNetwork.createSession(snapshot).token
-        require(token.isNotBlank()) { "免费服务未返回有效身份，请稍后再试。" }
-        mutex.withLock {
-            val current = state.value.settings
-            val known = credentials.get(identityKey)
-            // Keep a received identity, while preserving an explicitly changed credential from the same service.
-            if (known.isBlank() || known == snapshot.trialToken || known == token) credentials.put(identityKey, token)
-            require(current.mode == snapshot.mode && current.companionUrl == snapshot.companionUrl &&
-                (current.trialToken.isBlank() || current.trialToken == token)) { "服务设置已改变，请重新检查后开始。" }
-            val updated = current.copy(trialToken = token)
-            if (updated != current) storeSettings(updated)
-            mutableState.update { it.copy(settings = updated) }
-            updated
+        if (requireFreeMode) {
+            require(snapshot.mode == "companion") { "当前使用自己的 AI 服务。" }
+            val session = requireAccountSession()
+            return snapshot.copy(trialToken = session.token)
         }
+        require(!diagnosticsOnly || DiagnosticPrivacy.usesCompanion(snapshot.mode, snapshot.companionUrl)) { "诊断服务设置已改变" }
+        // Feedback may explicitly acquire a legacy identity. Startup, diagnostics and exports only reuse one.
+        return sessionMutex.withLock {
+            val identityKey = companionIdentityKey(snapshot.companionUrl)
+            val existing = snapshot.trialToken.ifBlank { credentials.get(identityKey) }
+            val token = if (existing.isNotBlank()) existing else {
+                require(allowLegacyCreate && !diagnosticsOnly) { "尚无可用的意见记录身份。" }
+                organizationNetwork.createSession(snapshot).token
+            }
+            require(token.isNotBlank()) { "服务未返回有效身份，请稍后再试。" }
+            mutex.withLock {
+                val current = state.value.settings
+                require(current.mode == snapshot.mode && current.companionUrl == snapshot.companionUrl &&
+                    (current.trialToken.isBlank() || current.trialToken == token)) { "服务设置已改变，请重试。" }
+                val updated = current.copy(trialToken = token)
+                if (updated != current) storeSettings(updated)
+                mutableState.update { it.copy(settings = updated) }
+                updated
+            }
+        }
+    }
+
+    private fun sameCurrentOrganizationSettings(snapshot: ServiceSettings): Boolean {
+        val current = state.value.settings
+        if (snapshot.mode != "companion") return current == snapshot
+        return sameCurrentAccountIdentity(snapshot) && current.withoutSecrets() == snapshot.withoutSecrets()
+    }
+
+    private fun sameCurrentAccountIdentity(snapshot: ServiceSettings): Boolean {
+        val session = currentAccount ?: return false
+        return state.value.settings.mode == "companion" && snapshot.mode == "companion" &&
+            !accountSessionExpired(session) && session.serviceUrl == snapshot.companionUrl &&
+            session.token == snapshot.trialToken && state.value.settings.companionUrl == snapshot.companionUrl
     }
 
     private suspend fun refreshQuotaState(): CompanionQuota = quotaMutex.withLock {
@@ -332,11 +480,12 @@ class AppController internal constructor(application: Application, databaseName:
         try {
             snapshot = ensureCompanionIdentity()
             val quota = organizationNetwork.quota(snapshot)
-            require(sameCompanionIdentity(state.value.settings, snapshot)) { "服务设置已改变，请重新检查后开始。" }
+            require(sameCurrentOrganizationSettings(snapshot)) { "服务设置已改变，请重新检查后开始。" }
             mutableState.update { it.copy(quota = quota, quotaLoading = false, quotaError = null) }
             quota
         } catch (error: Exception) {
-            if (sameCompanionIdentity(state.value.settings, snapshot) || state.value.settings == snapshot) {
+            handleAccountFailure(snapshot.trialToken, error)
+            if (sameCurrentOrganizationSettings(snapshot) || state.value.settings == snapshot) {
                 mutableState.update { it.copy(quota = null, quotaLoading = false,
                     quotaError = if (error is CancellationException) null else error.message ?: "免费额度查询失败，请检查网络后再试。") }
             } else mutableState.update { it.copy(quotaLoading = false) }
@@ -461,6 +610,62 @@ class AppController internal constructor(application: Application, databaseName:
         }
     }
 
+    suspend fun updateAdminUserQuota(userId: String, dailyLimit: Int?, todayRemaining: Int? = null, day: String? = null) =
+        withContext(Dispatchers.IO) {
+            ready.await()
+            adminUsersMutex.withLock {
+                val page = state.value.adminUsers
+                mutableState.update { it.copy(adminUsersLoading = true, adminUsersError = null) }
+                try {
+                    val users = withDeveloperSession { prefs ->
+                        AdminNetwork.updateUserQuota(prefs, userId, dailyLimit, todayRemaining, day)
+                        AdminNetwork.getUsers(prefs, page?.limit ?: 50, page?.offset ?: 0)
+                    }
+                    mutableState.update { it.copy(adminUsers = users, quota = null, quotaError = null) }
+                } catch (error: Exception) {
+                    if (error !is CancellationException) mutableState.update {
+                        it.copy(adminUsersError = error.message ?: "个人额度保存失败，请刷新确认。")
+                    }
+                    throw error
+                } finally { mutableState.update { it.copy(adminUsersLoading = false) } }
+            }
+        }
+
+    suspend fun refreshAdminRegistrationInvites() = withContext(Dispatchers.IO) {
+        ready.await()
+        adminRegistrationMutex.withLock {
+            mutableState.update { it.copy(adminRegistrationLoading = true, adminRegistrationError = null) }
+            try {
+                val invitations = withDeveloperSession { AdminNetwork.getRegistrationInvites(it) }
+                mutableState.update { it.copy(adminRegistrationInvites = invitations) }
+            } catch (error: Exception) {
+                if (error !is CancellationException) mutableState.update {
+                    it.copy(adminRegistrationError = error.message ?: "邀请码列表读取失败。")
+                }
+                throw error
+            } finally { mutableState.update { it.copy(adminRegistrationLoading = false) } }
+        }
+    }
+
+    suspend fun createAdminRegistrationInvites(count: Int, validDays: Int) = withContext(Dispatchers.IO) {
+        ready.await()
+        adminRegistrationMutex.withLock {
+            mutableState.update { it.copy(adminRegistrationLoading = true, adminRegistrationError = null) }
+            try {
+                val created = withDeveloperSession { AdminNetwork.createRegistrationInvites(it, count, validDays) }
+                mutableState.update { current ->
+                    current.copy(adminRegistrationInvites =
+                        (created + current.adminRegistrationInvites.orEmpty()).distinctBy { it.id })
+                }
+            } catch (error: Exception) {
+                if (error !is CancellationException) mutableState.update {
+                    it.copy(adminRegistrationError = error.message ?: "邀请码创建失败，请刷新列表确认结果。")
+                }
+                throw error
+            } finally { mutableState.update { it.copy(adminRegistrationLoading = false) } }
+        }
+    }
+
     private suspend fun <T> withDeveloperSession(block: suspend (DeveloperPrefs) -> T): T {
         val snapshot = state.value.developerPrefs
         if (snapshot.sessionToken.isBlank() || developerSessionExpired(snapshot)) {
@@ -492,6 +697,7 @@ class AppController internal constructor(application: Application, databaseName:
         mutableState.update { it.copy(developerPrefs = prefs, adminConfig = null, adminLoading = false, adminError = error,
             adminStats = null, adminStatsLoading = false, adminStatsError = null,
             adminUsers = null, adminUsersLoading = false, adminUsersError = null,
+            adminRegistrationInvites = null, adminRegistrationLoading = false, adminRegistrationError = null,
             adminFeedback = null, adminFeedbackLoading = false, adminFeedbackError = null,
             adminFeedbackDetail = null, adminFeedbackDetailLoading = false, adminFeedbackDetailError = null) }
     }
@@ -558,7 +764,7 @@ class AppController internal constructor(application: Application, databaseName:
             }
             val previous = synchronized(feedbackGuard) { pendingFeedback?.takeIf { it.second.idempotencyKey == draft.idempotencyKey } }
             val attempt = previous ?: run {
-                val identity = ensureCompanionIdentity(requireFreeMode = false).copy(apiKey = "")
+                val identity = ensureCompanionIdentity(requireFreeMode = false, allowLegacyCreate = true).copy(apiKey = "")
                 val submission = FeedbackSubmission(draft.idempotencyKey, draft.content.trim(), draft.contactType,
                     draft.contact.trim(), BuildConfig.VERSION_NAME, draft.images.map {
                         FeedbackUploadImage("image/jpeg", Base64.encodeToString(it.jpegBytes, Base64.NO_WRAP))
@@ -664,13 +870,13 @@ class AppController internal constructor(application: Application, databaseName:
     private fun scheduleQuotaRefresh(task: TaskRecord) {
         if (task.settings.mode != "companion") return
         val snapshot = runCatching { withTaskSecret(task) }.getOrNull() ?: return
-        if (!sameCompanionIdentity(state.value.settings, snapshot)) return
+        if (!sameCurrentAccountIdentity(snapshot)) return
         mutableState.update { it.copy(quota = null, quotaLoading = true, quotaError = null) }
         synchronized(quotaRefreshGuard) {
             backgroundQuotaRefresh?.cancel()
             backgroundQuotaRefresh = viewModelScope.launch(Dispatchers.IO) {
                 delay(150)
-                if (!sameCompanionIdentity(state.value.settings, snapshot)) return@launch
+                if (!sameCurrentAccountIdentity(snapshot)) return@launch
                 try { refreshQuotaState() } catch (error: Exception) {
                     if (error is CancellationException) throw error
                     // refreshQuotaState exposes the failure through quotaError without changing task success.
@@ -898,7 +1104,7 @@ class AppController internal constructor(application: Application, databaseName:
         try {
             val snapshot = if (state.value.settings.mode == "companion") ensureCompanionIdentity() else state.value.settings
             val quota = if (snapshot.mode == "companion") refreshQuotaState() else null
-            require(state.value.settings == snapshot) { "服务设置已改变，请重新检查后开始。" }
+            require(sameCurrentOrganizationSettings(snapshot)) { "服务设置已改变，请重新检查后开始。" }
             quota?.organizationBlocker()?.let { error(it) }
             val promptVersion = organizationPromptVersion(snapshot, quota)
             val settings = validateOrganizationConfiguration(if (quota != null) settingsWithServerBudget(snapshot, quota, promptVersion) else snapshot,
@@ -942,7 +1148,7 @@ class AppController internal constructor(application: Application, databaseName:
             require(reorganizationSourceFingerprint(original, resolved) == plan.sourceFingerprint) {
                 "档案或原文已变化，请重新检查后确认整理。"
             }
-            require(state.value.settings == snapshot) { "服务设置已改变，请重新检查后开始。" }
+            require(sameCurrentOrganizationSettings(snapshot)) { "服务设置已改变，请重新检查后开始。" }
             quota?.organizationBlocker()?.let { error(it) }
             val promptVersion = organizationPromptVersion(snapshot, quota)
             val settings = validateOrganizationConfiguration(if (quota != null) settingsWithServerBudget(snapshot, quota, promptVersion) else snapshot,
@@ -966,7 +1172,8 @@ class AppController internal constructor(application: Application, databaseName:
                 .copy(sourceScopes = resolved.sourceScopes)
             val task = TaskRecord(taskId, targetId, target.title, settings.withoutSecrets(), "task:$taskId", records,
                 message = estimateCost(settings, records, promptVersion), promptVersion = promptVersion,
-                reorganizationOfArchiveId = original.id)
+                reorganizationOfArchiveId = original.id,
+                ownerUserId = if (settings.mode == "companion") currentAccount?.user?.id else null)
             credentials.put(task.secretRef, if (settings.mode == "byok") settings.apiKey else settings.trialToken)
             DiagnosticLog.record("task", "prepare", mapOf("chunk_count" to records.size.toLong()))
             database.withTransaction {
@@ -1034,7 +1241,7 @@ class AppController internal constructor(application: Application, databaseName:
             val messages = selectMessages(source, branchId, addition.messageIds.toSet())
             require(messages == requestedMessages) { "档案或原文已变化，请重新查看新增范围后再开始。" }
             require(messages.isNotEmpty()) { "请选择要整理的消息" }
-            require(state.value.settings == settingsSnapshot) { "服务设置已改变，请重新检查后开始。" }
+            require(sameCurrentOrganizationSettings(settingsSnapshot)) { "服务设置已改变，请重新检查后开始。" }
             if (freeQuota != null) require(freeQuota.organizationBlocker() == null) { freeQuota.organizationBlocker().orEmpty() }
             val promptVersion = organizationPromptVersion(settingsSnapshot, freeQuota)
             if (freeQuota != null && previewQuota != null) require(
@@ -1068,7 +1275,8 @@ class AppController internal constructor(application: Application, databaseName:
                 else ContinuityLogic.captureScope(source, branchId, actualInitialIds)
             val task = TaskRecord(id, archiveId, archive.title, settings.withoutSecrets(), "task:$id", records,
                 message = estimateCost(settings, records, promptVersion), promptVersion = promptVersion,
-                initialContextScope = initialScope)
+                initialContextScope = initialScope,
+                ownerUserId = if (settings.mode == "companion") currentAccount?.user?.id else null)
             DiagnosticLog.record("task", "prepare", mapOf("chunk_count" to records.size.toLong()))
             database.withTransaction {
                 val scoped = withSelectedSourceScope(archive, source, branchId, selectedIds)
@@ -1096,12 +1304,16 @@ class AppController internal constructor(application: Application, databaseName:
                 else "上次请求的计费结果不确定。确认可能重复计费后再继续。"
             }
             var secretRef = task.secretRef
-            if (secretRef.isBlank() || credentials.get(secretRef).isBlank()) {
+            if (task.settings.mode == "companion" && task.ownerUserId != null) {
+                val session = currentAccount
+                require(taskBelongsToAccount(task, session)) { "请登录创建此任务的同一账户后再继续。" }
+                secretRef = secretRef.ifBlank { "task:$taskId" }
+                // A logout revokes the old token. Only this explicit same-owner resume rebinds it.
+                credentials.put(secretRef, session!!.token)
+            } else if (secretRef.isBlank() || credentials.get(secretRef).isBlank()) {
                 val current = state.value.settings
                 val secret = if (task.settings.mode == "companion") {
-                    credentials.get(companionIdentityKey(task.settings.companionUrl)).ifBlank {
-                        if (current.companionUrl == task.settings.companionUrl) current.trialToken else ""
-                    }
+                    error("旧任务的原始凭据不在这台设备中，无法安全确认归属。请保留现有进度。")
                 } else {
                     require(current.mode == "byok" && current.baseUrl == task.settings.baseUrl && current.model == task.settings.model) {
                         "此任务原服务为 ${task.display().provider}，请先保存同一服务的凭据再继续"
@@ -1143,6 +1355,10 @@ class AppController internal constructor(application: Application, databaseName:
         val task = mutex.withLock {
             val current = dao.task(taskId)?.decodeTask() ?: return@withLock null
             if (current.status == "completed") return@withLock null
+            if (current.settings.mode == "companion" && current.ownerUserId != null &&
+                taskBelongsToAccount(current, currentAccount) && current.secretRef.isNotBlank()) {
+                credentials.put(current.secretRef, currentAccount!!.token)
+            }
             val updated = if (current.cancelRequested && current.status == "cancelled") current else current.forCancellation()
             saveTask(updated)
             refresh()
@@ -1327,6 +1543,10 @@ class AppController internal constructor(application: Application, databaseName:
                 }
             }
             oldTaskIds.forEach { credentials.remove("task:$it") }
+            if (currentAccount?.serviceUrl != null && currentAccount?.serviceUrl != restoredSettings.companionUrl) {
+                clearAccountLocked()
+                politicalExport.suspendAccountTasks()
+            }
             storeSettings(restoredSettings)
             mutableState.update { it.copy(settings = restoredSettings, quota = null, quotaLoading = false, quotaError = null) }
             refresh(reloadConversations = true)
@@ -1398,6 +1618,10 @@ class AppController internal constructor(application: Application, databaseName:
                 val task = dao.task(taskId)?.decodeTask() ?: return
                 val failures = (error as? TaskDispatchException)?.failures.orEmpty()
                 val primary = failures.firstOrNull()?.error ?: error
+                if (primary is SummaryFailure && primary.statusCode == 401 &&
+                    currentAccount?.token == credentials.get(task.secretRef)) {
+                    clearAccountLocked("账户登录已过期，请重新登录。")
+                }
                 DiagnosticLog.record("task", "failed", buildMap {
                     put("chunk_count", task.chunks.size.toLong())
                     put("chunk_index", task.chunks.count { it.completed }.toLong())
@@ -1444,6 +1668,7 @@ class AppController internal constructor(application: Application, databaseName:
             mutex.withLock {
                 val current = loadTask(taskId)
                 if (current.cancelRequested || current.status != "running") throw CancellationException()
+                requireTaskAccountLocked(current, allowLegacyLookup = chunk.requestStarted)
                 saveTask(current.updateChunk(chunk.id) { it.copy(requestStarted = true, inFlight = true) })
             }
         }, abandonUnsent = {
@@ -1459,6 +1684,7 @@ class AppController internal constructor(application: Application, databaseName:
         var remoteId = chunk.remoteJobId
         var remote = if (remoteId.isEmpty()) {
             if (!maySubmit()) return null
+            mutex.withLock { requireTaskAccountLocked(loadTask(task.id), allowLegacyLookup = chunk.requestStarted) }
             // A lost POST is recovered by the original idempotency identity even
             // when it consumed the last quota or the service budget has changed.
             if (!chunk.requestStarted) {
@@ -1513,6 +1739,14 @@ class AppController internal constructor(application: Application, databaseName:
             remote = organizationNetwork.poll(settings, remoteId)
         }
         throw SummaryFailure("远端任务仍在处理，已保存任务编号，可稍后继续查询", false)
+    }
+
+    private fun requireTaskAccountLocked(task: TaskRecord, allowLegacyLookup: Boolean) {
+        if (task.settings.mode != "companion") return
+        // Legacy lost POSTs may look up the exact admitted identity using their original credential.
+        if (task.ownerUserId == null && allowLegacyLookup) return
+        require(taskBelongsToAccount(task, currentAccount)) { "请登录创建此任务的账户后再继续免费智能整理。" }
+        require(currentAccount!!.token == credentials.get(task.secretRef)) { "账户会话已改变，请明确恢复此任务。" }
     }
 
     private suspend fun persistChunk(taskId: String, chunk: TaskChunk, entries: List<ArchiveEntry>) {

@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +21,7 @@ def public_settings(tmp_path):
         public_enabled=True,
         daily_limit=50,
         user_daily_limit=5,
+        public_registration_limit=1000,
         worker_enabled=False,
     )
 
@@ -32,9 +34,10 @@ def job_payload(key="public-job-0001", content="用户下周每天练习英语�
 
 
 def new_session(client):
-    response = client.post("/v1/sessions", json={})
-    assert response.status_code == 200
-    body = response.json()
+    identity = uuid4().hex
+    body = client.app.state.store.accounts.register(
+        "public_" + identity[:24], "synthetic-public-password", client_ip="synthetic-" + identity,
+    )
     return {"Authorization": "Bearer " + body["token"]}, body
 
 
@@ -50,7 +53,7 @@ def submit(client, headers, key="public-job-0001"):
     return response.json()
 
 
-def test_anonymous_session_is_enabled_without_money_configuration(public_settings):
+def test_anonymous_session_quota_remains_readable_but_new_public_jobs_require_registration(public_settings):
     app = create_app(public_settings)
     with TestClient(app) as client:
         response = client.post("/v1/sessions")
@@ -73,13 +76,14 @@ def test_anonymous_session_is_enabled_without_money_configuration(public_setting
         assert reset.utcoffset().total_seconds() == 8 * 3600
         with app.state.store.connection() as db:
             assert db.execute("SELECT token_hash FROM users").fetchone()[0] == digest(token)
-        job = submit(client, headers)
-        assert job["cost_known"] is False
+        response = client.post("/v1/jobs", headers=headers, json=job_payload())
+        assert response.status_code == 401
         current = quota(client, headers)
-        assert current["daily_used"] == 0
-        assert current["daily_reserved"] == 1
-        assert current["daily_remaining"] == 49
-        assert current["user_daily_remaining"] == 4
+        assert current["daily_used"] == current["daily_reserved"] == 0
+        assert current["daily_remaining"] == 50
+        assert current["user_daily_remaining"] == 5
+        with app.state.store.connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
 
 def test_fifty_global_and_five_per_user_hold_under_concurrent_submissions(public_settings):
@@ -116,7 +120,7 @@ def test_fifty_global_and_five_per_user_hold_under_concurrent_submissions(public
         assert current["daily_remaining"] == 0
 
 
-def test_same_anonymous_user_can_only_reserve_five_concurrently(public_settings):
+def test_same_registered_user_can_only_reserve_five_concurrently(public_settings):
     app = create_app(public_settings)
     with TestClient(app) as client:
         headers, _ = new_session(client)
@@ -343,7 +347,7 @@ def test_changed_provider_configuration_releases_queue_without_counting_call(pub
         assert current["daily_remaining"] == 50
 
 
-def test_existing_invitation_identity_can_use_public_quota_without_token_change(public_settings):
+def test_existing_invitation_identity_keeps_readable_public_quota_but_cannot_admit_new_public_jobs(public_settings):
     app = create_app(public_settings)
     with TestClient(app) as client:
         app.state.store.update_config({"public_enabled": False})
@@ -359,6 +363,7 @@ def test_existing_invitation_identity_can_use_public_quota_without_token_change(
         assert app.state.store.authenticate(token) == owner_id
         assert quota(client, headers)["access_mode"] == "public"
         assert quota(client, headers)["enabled"] is True
-        submit(client, headers)
+        assert client.post("/v1/jobs", headers=headers, json=job_payload()).status_code == 401
         with app.state.store.connection() as db:
             assert db.execute("SELECT budget_limit FROM users WHERE id=?", (owner_id,)).fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM jobs WHERE owner_id=?", (owner_id,)).fetchone()[0] == 0

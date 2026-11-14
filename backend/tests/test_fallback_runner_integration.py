@@ -8,6 +8,7 @@ from app import failover
 from app.config import ProviderRoute, Settings
 from app.main import create_app
 from app.provider import ProviderOutcome
+from account_fixtures import register_owner, registered_job
 
 
 def test_real_runner_records_each_route_and_idempotent_submission_does_not_replay(tmp_path, monkeypatch):
@@ -36,7 +37,8 @@ def test_real_runner_records_each_route_and_idempotent_submission_does_not_repla
         app = create_app(settings)
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-                session = (await client.post("/v1/sessions")).json()
+                session = (await client.post("/v1/accounts/register", json={
+                    "username": "runner_synthetic", "password": "synthetic password 123"})).json()
                 assert session["quota"]["max_attempts_per_chunk"] == 3
                 headers = {"Authorization": "Bearer " + session["token"]}
                 body = {"idempotency_key": "integration-fallback-job",
@@ -96,10 +98,9 @@ def test_shutdown_during_attempt_commit_keeps_validated_result(tmp_path, monkeyp
 
         monkeypatch.setattr(app.state.store, "finish_provider_attempt", blocked_finish)
         async with app.router.lifespan_context(app):
-            token, _ = app.state.store.create_session()
-            owner = app.state.store.authenticate(token)
+            owner, token = register_owner(app.state.store)
             from app.schemas import JobRequest
-            job = app.state.store.create_job(owner, JobRequest.model_validate({
+            job = registered_job(app.state.store, owner, token, JobRequest.model_validate({
                 "idempotency_key": "shutdown-known-result", "messages": [{"id": "source", "role": "user", "content": "synthetic"}]}))
             app.state.runner.notify()
             assert await asyncio.to_thread(entered.wait, 2)

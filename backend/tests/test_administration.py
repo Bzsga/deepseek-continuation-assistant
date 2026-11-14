@@ -191,6 +191,12 @@ def add_user(db, created_at, access_mode="invitation", last_seen=None):
     user_id = str(uuid.uuid4())
     db.execute("INSERT INTO users(id,token_hash,budget_limit,created_at,access_mode,last_seen) VALUES(?,?,?,?,?,?)",
                (user_id, digest(secrets.token_urlsafe(32)), 0, created_at, access_mode, last_seen))
+    registration_kind = "public" if access_mode == "public" else "invitation"
+    db.execute("""INSERT INTO registered_accounts(user_id,username,username_key,password_hash,
+                  registration_kind,created_at) VALUES(?,?,?,?,?,?)""",
+               (user_id, user_id, user_id, "synthetic-password-hash", registration_kind, created_at))
+    if registration_kind == "public":
+        db.execute("UPDATE registration_counter SET public_registered_count=public_registered_count+1 WHERE id=1")
     return user_id
 
 

@@ -41,6 +41,7 @@ internal fun SettingsScreen(
     onFeedback: () -> Unit,
     setupOnly: Boolean = false,
     onReady: () -> Unit = {},
+    onAccount: () -> Unit = {},
 ) {
     val settings = state.settings
     var mode by remember(settings.mode) { mutableStateOf(settings.mode) }
@@ -71,6 +72,9 @@ internal fun SettingsScreen(
                 TextButton(onClick = onAbout) { Text("关于与开源致谢") }
             }
         }
+        if (!setupOnly || mode == "companion") item {
+            AccountSummaryCard(state, onAccount)
+        }
         if (!setupOnly) item {
             Card(onClick = { serviceExpanded = !serviceExpanded },
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
@@ -87,7 +91,7 @@ internal fun SettingsScreen(
             }
         }
         if (serviceExpanded || setupOnly) {
-        if (setupOnly) item { SectionTitle("整理服务", "免费服务可以直接使用，也可以选择自己的 API。") }
+        if (setupOnly) item { SectionTitle("整理服务", "免费智能整理需要登录，也可以使用自己的 API。") }
         item {
             ActionRow {
                 FilterChip(
@@ -112,7 +116,7 @@ internal fun SettingsScreen(
             item {
                 if (settings.mode == "companion")
                     FreeQuotaCard(state, onRefresh = { run { controller.refreshQuota() } })
-                else NoticeCard("保存设置后即可使用免费服务，并查看今日剩余次数。")
+                else NoticeCard("保存后使用账户的免费次数。自己的 API 无需登录。")
             }
             item {
                 Text(
@@ -324,12 +328,37 @@ internal fun SettingsScreen(
 }
 
 @Composable
+internal fun AccountSummaryCard(state: AppState, onAccount: () -> Unit) {
+    val user = state.account.currentUser
+    Card(onClick = onAccount,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.AccountCircle, null, tint = Blue)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(user?.username ?: "登录 / 注册", fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (user == null) "使用免费智能整理；本机记录不随账户同步。"
+                    else state.quota?.userDailyRemaining?.let { "今日还可用 $it 次免费整理" }
+                        ?: "管理账户与个人免费次数",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(Icons.Outlined.ChevronRight, "打开账户")
+        }
+    }
+}
+
+@Composable
 internal fun TasksScreen(
     tasks: List<OrganizationTask>,
     controller: AppController,
     run: (suspend () -> Unit) -> Unit,
+    onAccount: () -> Unit = {},
     onArchive: (String) -> Unit,
 ) {
+    val currentState by controller.state.collectAsState()
     var resume by remember { mutableStateOf<OrganizationTask?>(null) }
     var cancel by remember { mutableStateOf<OrganizationTask?>(null) }
     LazyColumn(
@@ -340,6 +369,7 @@ internal fun TasksScreen(
         item { SectionTitle("整理任务", "每个完成的分块都会保存。暂停后可从进度继续。") }
         if (tasks.isEmpty()) item { NoticeCard("还没有整理任务。在对话范围选择页点击「AI 整理」即可开始。") }
         items(tasks, key = { it.id }) { task ->
+            val needsLogin = task.serviceMode == "companion" && currentState.account.currentUser == null
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
@@ -372,11 +402,12 @@ internal fun TasksScreen(
                         if (task.status in setOf("paused", "cancelled", "failed", "uncertain"))
                             TextButton(
                                 onClick = {
-                                    if (task.uncertain) resume = task
+                                    if (needsLogin) onAccount()
+                                    else if (task.uncertain) resume = task
                                     else run { controller.resumeTask(task.id, false) }
                                 }
                             ) {
-                                Text("继续")
+                                Text(if (needsLogin) "登录后继续整理" else "继续")
                             }
                         if (task.status !in setOf("completed", "cancelled"))
                             TextButton(onClick = { cancel = task }) { Text("取消任务") }
@@ -387,6 +418,7 @@ internal fun TasksScreen(
         }
     }
     resume?.let { task ->
+        val needsLogin = task.serviceMode == "companion" && currentState.account.currentUser == null
         AlertDialog(
             onDismissRequest = { resume = null },
             title = { Text("确认继续整理") },
@@ -394,13 +426,16 @@ internal fun TasksScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        run {
+                        if (needsLogin) {
+                            resume = null
+                            onAccount()
+                        } else run {
                             controller.resumeTask(task.id, true)
                             resume = null
                         }
                     }
                 ) {
-                    Text(if (task.serviceMode == "companion") "确认消耗次数并继续" else "确认可能的额外费用并继续")
+                    Text(if (needsLogin) "登录后继续整理" else if (task.serviceMode == "companion") "确认消耗次数并继续" else "确认可能的额外费用并继续")
                 }
             },
             dismissButton = { TextButton(onClick = { resume = null }) { Text("暂不继续") } },

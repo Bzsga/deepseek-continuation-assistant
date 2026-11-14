@@ -86,7 +86,9 @@ object AdminNetwork {
             apiEnabled = root.boolean("api_enabled"),
             mockMode = root.boolean("mock_mode"),
             costKnown = root.boolean("cost_known"),
-            configVersion = root.integer("config_version")
+            configVersion = root.integer("config_version"),
+            publicRegistrationLimit = if ("public_registration_limit" in root) root.nonnegativeInteger("public_registration_limit") else 20,
+            publicRegisteredCount = if ("public_registered_count" in root) root.nonnegativeInteger("public_registered_count") else 0,
         )
         validateConfig(config)
         require(config.configVersion >= 0) { "开发者配置版本无效" }
@@ -100,6 +102,7 @@ object AdminNetwork {
             put("public_enabled", config.publicEnabled)
             put("daily_limit", config.dailyLimit)
             put("user_daily_limit", config.userDailyLimit)
+            put("public_registration_limit", config.publicRegistrationLimit)
             put("model", config.model)
             put("base_url", config.baseUrl)
             put("context_tokens", config.contextTokens)
@@ -156,13 +159,114 @@ object AdminNetwork {
                 user.count("total_requests"), user.count("completed"), user.count("failed"),
                 user.count("uncertain"), user.count("cancelled"), user.count("input_tokens"), user.count("output_tokens"),
                 usageKnownRequests = user.optionalCount("usage_known_requests"),
-                usageUnknownRequests = user.optionalCount("usage_unknown_requests"))
+                usageUnknownRequests = user.optionalCount("usage_unknown_requests"),
+                username = user.optionalText("username"),
+                registrationKind = user.optionalText("registration_kind")?.also {
+                    require(it in setOf("public", "invitation")) { "注册来源无效" }
+                },
+                dailyLimitOverride = if (user["daily_limit_override"] == null || user["daily_limit_override"] == JsonNull) null
+                    else user.nonnegativeInteger("daily_limit_override"))
         }
-        return AdminUsersPage(limit, offset, root.count("total"), users)
+        return AdminUsersPage(limit, offset, root.count("total"), users,
+            day = root.optionalText("day")?.also { LocalDate.parse(it) },
+            resetAt = root.optionalText("reset_at")?.also { OffsetDateTime.parse(it) })
+    }
+
+    suspend fun getRegistrationInvites(prefs: DeveloperPrefs): List<AdminRegistrationInvite> {
+        return collectRegistrationInvites { limit, offset ->
+            val url = SummaryNetwork.companionEndpoint(prefs.serviceUrl, "admin", "registration-invites").newBuilder()
+                .addQueryParameter("limit", limit.toString()).addQueryParameter("offset", offset.toString()).build()
+            SummaryNetwork.exchange(SummaryNetwork.authenticated(url, prefs.sessionToken).get().build(),
+                mutation = false, secrets = listOf(prefs.sessionToken))
+        }
+    }
+
+    internal suspend fun collectRegistrationInvites(
+        fetchPage: suspend (limit: Int, offset: Int) -> String,
+    ): List<AdminRegistrationInvite> {
+        val limit = 100
+        var offset = 0
+        var expectedTotal: Int? = null
+        val invitations = mutableListOf<AdminRegistrationInvite>()
+        val ids = mutableSetOf<String>()
+        while (true) {
+            val payload = fetchPage(limit, offset)
+            val page = parseResponse {
+                val root = objectResponse(payload)
+                val total = root.count("total")
+                require(total <= Int.MAX_VALUE) { "邀请码总数超出本机列表范围" }
+                RegistrationInvitesPage(root.integer("limit"), root.nonnegativeInteger("offset"), total.toInt(),
+                    parseRegistrationInvites(payload))
+            }
+            if (page.limit != limit || page.offset != offset) {
+                throw SummaryFailure("邀请码服务的分页参数不一致，请更新服务或刷新后重试", ambiguous = false)
+            }
+            if (expectedTotal != null && page.total != expectedTotal) {
+                throw SummaryFailure("邀请码列表已变化，请刷新后重试", ambiguous = false)
+            }
+            expectedTotal = page.total
+            if (page.total < offset || page.invitations.size != minOf(limit, page.total - offset)) {
+                throw SummaryFailure("邀请码列表未完整返回，请刷新后重试", ambiguous = false)
+            }
+            if (page.invitations.any { it.code.isNullOrBlank() || it.usedAt != null || !ids.add(it.id) }) {
+                throw SummaryFailure("邀请码列表含重复或不可分发记录，请刷新后重试", ambiguous = false)
+            }
+            invitations.addAll(page.invitations)
+            offset += page.invitations.size
+            if (offset == expectedTotal) return invitations
+        }
+    }
+
+    private data class RegistrationInvitesPage(val limit: Int, val offset: Int, val total: Int,
+        val invitations: List<AdminRegistrationInvite>)
+
+    suspend fun createRegistrationInvites(prefs: DeveloperPrefs, count: Int, validDays: Int): List<AdminRegistrationInvite> {
+        require(count in 1..100 && validDays in 1..365) { "邀请码数量须为1–100，有效期须为1–365天。" }
+        val body = buildJsonObject { put("count", count); put("valid_days", validDays) }.toString()
+        val payload = SummaryNetwork.exchange(authenticated(prefs, "registration-invites")
+            .post(body.toRequestBody(contentType)).build(), mutation = true, secrets = listOf(prefs.sessionToken))
+        return parseResponse { parseRegistrationInvites(payload) }
+    }
+
+    suspend fun updateUserQuota(prefs: DeveloperPrefs, userId: String, dailyLimit: Int?,
+        todayRemaining: Int? = null, day: String? = null) {
+        require(userId.isNotBlank() && userId.length <= 256) { "用户编号无效" }
+        val body = userQuotaPayload(dailyLimit, todayRemaining, day)
+        SummaryNetwork.exchange(authenticated(prefs, "users", userId, "quota")
+            .patch(body.toRequestBody(contentType)).build(), mutation = true, secrets = listOf(prefs.sessionToken))
+    }
+
+    internal fun userQuotaPayload(dailyLimit: Int?, todayRemaining: Int?, day: String?): String {
+        require(dailyLimit == null || dailyLimit in 0..1_000_000) { "个人每日次数须在0到1000000之间。" }
+        require(todayRemaining == null || todayRemaining in 0..1_000_000) { "今日剩余次数须在0到1000000之间。" }
+        if (day != null) LocalDate.parse(day)
+        return buildJsonObject {
+            if (dailyLimit == null) put("daily_limit", JsonNull) else put("daily_limit", dailyLimit)
+            if (todayRemaining != null) {
+                put("today_remaining", todayRemaining)
+                if (day != null) put("day", day)
+            }
+        }.toString()
+    }
+
+    internal fun parseRegistrationInvites(payload: String): List<AdminRegistrationInvite> {
+        val root = objectResponse(payload)
+        val values = root["invitations"] as? JsonArray ?: error("邀请码响应缺少列表")
+        require(values.size <= 200) { "邀请码列表超过限制" }
+        return values.map { element ->
+            val value = element as? JsonObject ?: error("邀请码格式无效")
+            AdminRegistrationInvite(value.text("id").also { require(it.isNotBlank() && it.length <= 256) },
+                code = value.optionalText("code")?.also { require(it.isNotBlank() && it.length <= 256) },
+                expiresAt = value.timestamp("expires_at"),
+                createdAt = value.optionalText("created_at")?.also { OffsetDateTime.parse(it) }.orEmpty(),
+                usedAt = value.optionalText("redeemed_at")?.also { OffsetDateTime.parse(it) },
+                usedBy = value.optionalText("redeemed_by"))
+        }
     }
 
     private fun validateConfig(config: AdminConfig) {
         require(config.dailyLimit in 0..1_000_000 && config.userDailyLimit in 0..1_000_000) { "每日次数须在 0 到 1000000 之间" }
+        require(config.publicRegistrationLimit in 0..1_000_000) { "公开注册人数上限须在0到1000000之间。" }
         require(config.model.isNotBlank() && config.model.length <= 128) { "请输入有效模型名称" }
         require(config.baseUrl.length <= 2048) { "上游地址过长" }
         SummaryNetwork.checkedBase(config.baseUrl)
@@ -195,6 +299,9 @@ object AdminNetwork {
         require(value != null) { "开发者响应缺少 $key" }
         return value
     }
+
+    private fun JsonObject.optionalText(key: String): String? =
+        if (this[key] == null || this[key] == JsonNull) null else text(key)
 
     private fun JsonObject.boolean(key: String): Boolean {
         val value = (this[key] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull

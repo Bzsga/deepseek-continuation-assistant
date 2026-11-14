@@ -4,7 +4,7 @@ import hmac
 import ipaddress
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -31,6 +31,31 @@ class AdminLogin(BaseModel):
         except UnicodeError:
             raise ValueError("密码包含无效字符") from None
         return self
+
+
+class UserQuotaPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    daily_limit: int | None = Field(default=None, ge=0, le=1_000_000)
+    today_remaining: int | None = Field(default=None, ge=0, le=1_000_000)
+    day: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @model_validator(mode="after")
+    def valid_changes(self):
+        for field in ("today_remaining", "day"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError("今日次数及日期不能为 null")
+        if self.day is not None:
+            try:
+                date.fromisoformat(self.day)
+            except ValueError:
+                raise ValueError("日期格式不正确") from None
+        return self
+
+
+class RegistrationInviteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    count: int = Field(default=1, ge=1, le=100)
+    valid_days: int = Field(default=7, ge=1, le=365)
 
 
 def _hash(value):
@@ -106,17 +131,20 @@ def _statistics(store, days):
     with store.connection() as db:
         db.execute("BEGIN")
         settings = store._settings(db)
-        totals = {"users": int(db.execute("SELECT COUNT(*) FROM users").fetchone()[0])}
+        totals = {"users": int(db.execute("SELECT COUNT(*) FROM registered_accounts").fetchone()[0])}
         totals["active_users"] = int(db.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM user_activity WHERE day BETWEEN ? AND ?",
+            """SELECT COUNT(DISTINCT activity.user_id) FROM user_activity AS activity
+               JOIN registered_accounts AS account ON account.user_id=activity.user_id
+               WHERE activity.day BETWEEN ? AND ?""",
             (start_date, end_date),
         ).fetchone()[0])
         for row in db.execute("""SELECT strftime('%Y-%m-%d',created_at,'unixepoch','+8 hours') AS date,
-                COUNT(*) AS new_users FROM users WHERE created_at>=? AND created_at<? GROUP BY date""",
+                COUNT(*) AS new_users FROM registered_accounts WHERE created_at>=? AND created_at<? GROUP BY date""",
                 (start_at, end_at)):
             daily[row["date"]]["new_users"] = int(row["new_users"])
-        for row in db.execute("SELECT day,COUNT(*) AS active_users FROM user_activity WHERE day BETWEEN ? AND ? GROUP BY day",
-                              (start_date, end_date)):
+        for row in db.execute("""SELECT activity.day,COUNT(*) AS active_users FROM user_activity AS activity
+                JOIN registered_accounts AS account ON account.user_id=activity.user_id
+                WHERE activity.day BETWEEN ? AND ? GROUP BY activity.day""", (start_date, end_date)):
             daily[row["day"]]["active_users"] = int(row["active_users"])
         for row in db.execute(f"""WITH provider_request_usage AS ({PROVIDER_REQUEST_USAGE_SQL})
                 SELECT count_day,COUNT(*) AS requests,
@@ -146,14 +174,17 @@ def _statistics(store, days):
 
 
 def _users(store, limit, offset):
-    today = local_day()
+    now = time.time()
+    today = local_day(now)
     users = []
     with store.connection() as db:
         db.execute("BEGIN")
         settings = store._settings(db)
-        total = int(db.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+        total = int(db.execute("SELECT COUNT(*) FROM registered_accounts").fetchone()[0])
         rows = db.execute(f"""WITH provider_request_usage AS ({PROVIDER_REQUEST_USAGE_SQL}), page AS (
-                SELECT id,access_mode,created_at,last_seen FROM users ORDER BY created_at DESC,id LIMIT ? OFFSET ?
+                SELECT u.id,u.access_mode,a.created_at,u.last_seen,a.username,a.registration_kind,a.daily_limit_override
+                FROM registered_accounts AS a JOIN users AS u ON u.id=a.user_id
+                ORDER BY a.created_at DESC,u.id LIMIT ? OFFSET ?
             ), request_totals AS (
                 SELECT owner_id,SUM(count_day=?) AS daily_used,COUNT(*) AS total_requests,
                     SUM(usage_known=1) AS usage_known_requests,SUM(usage_known<>1) AS usage_unknown_requests,
@@ -166,6 +197,7 @@ def _users(store, limit, offset):
                     SUM(status='uncertain') AS uncertain,SUM(status='cancelled') AS cancelled
                 FROM jobs WHERE owner_id IN (SELECT id FROM page) GROUP BY owner_id
             ) SELECT page.id,page.access_mode,page.created_at,page.last_seen,
+                page.username,page.registration_kind,page.daily_limit_override,
                 COALESCE(request_totals.daily_used,0) AS daily_used,
                 COALESCE(job_totals.daily_reserved,0) AS daily_reserved,
                 COALESCE(request_totals.total_requests,0) AS total_requests,
@@ -182,17 +214,21 @@ def _users(store, limit, offset):
             ORDER BY page.created_at DESC,page.id""",
             (limit, offset, today)).fetchall()
         for row in rows:
+            quota = store.daily_quota(db, row["id"], settings=settings, timestamp=now)
             counts = {field: int(row[field]) for field in ("daily_used", "daily_reserved", "total_requests",
                       "usage_known_requests", "usage_unknown_requests",
                       "completed", "failed", "uncertain", "cancelled", "input_tokens", "output_tokens")}
             users.append({"id": row["id"],
+                          "username": row["username"], "registration_kind": row["registration_kind"],
+                          "daily_limit_override": row["daily_limit_override"],
                           "access_mode": "public" if settings.public_enabled or row["access_mode"] == "public" else "invitation",
                           "created_at": _iso(row["created_at"]),
                           "last_seen_at": _iso(row["last_seen"]) if row["last_seen"] is not None else None,
-                          "daily_limit": int(settings.user_daily_limit),
-                          "daily_remaining": max(0, settings.user_daily_limit - counts["daily_used"] - counts["daily_reserved"]),
+                          "daily_limit": int(quota["user_daily_limit"]),
+                          "daily_remaining": int(quota["user_daily_remaining"]),
                           **counts})
-    return {"limit": limit, "offset": offset, "total": total, "users": users}
+    return {"limit": limit, "offset": offset, "total": total, "users": users,
+            "day": today, "reset_at": reset_at(now)}
 
 
 def admin_authorizer(store):
@@ -263,5 +299,17 @@ def build_admin_router(store):
     @router.get("/users", dependencies=[Depends(require_admin)])
     def users(limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0)):
         return _users(store, limit, offset)
+
+    @router.patch("/users/{user_id}/quota", dependencies=[Depends(require_admin)])
+    def update_user_quota(user_id: str, body: UserQuotaPatch):
+        return store.update_user_quota(user_id, body.model_dump(exclude_unset=True))
+
+    @router.get("/registration-invites", dependencies=[Depends(require_admin)])
+    def registration_invites(limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+        return store.accounts.list_invites(limit, offset)
+
+    @router.post("/registration-invites", dependencies=[Depends(require_admin)])
+    def create_registration_invites(body: RegistrationInviteRequest):
+        return store.accounts.create_invites(body.count, body.valid_days)
 
     return router

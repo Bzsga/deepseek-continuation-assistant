@@ -13,6 +13,7 @@ from app.main import create_app
 from app.provider import ProviderOutcome, organize, parse_usage, snapshot_for
 from app.schemas import JobRequest
 from app.store import Store
+from account_fixtures import registered_job, registered_session, register_owner
 
 
 PRIVATE = "SYNTHETIC_PRIVATE_RESPONSE_VALUE"
@@ -228,7 +229,7 @@ def test_gateway_502_remains_uncertain_counted_once_without_reading_error_body(s
     monkeypatch.setattr("app.provider.httpx.AsyncClient", client)
     app = create_app(settings)
     with TestClient(app) as client:
-        token = client.post("/v1/sessions").json()["token"]
+        token = registered_session(client)["token"]
         headers = {"Authorization": "Bearer " + token}
         body = {"idempotency_key": "upstream-502-once", "messages": messages()}
         job = client.post("/v1/jobs", headers=headers, json=body).json()
@@ -250,7 +251,7 @@ def test_public_result_unknown_usage_counts_once_and_stats_exclude_tokens(settin
     requests = mock_http(monkeypatch, envelope(include_usage=False))
     app = create_app(settings)
     with TestClient(app) as client:
-        token = client.post("/v1/sessions").json()["token"]
+        token = registered_session(client)["token"]
         headers = {"Authorization": "Bearer " + token}
         body = {"idempotency_key": "usage-public-0001", "messages": messages()}
         job = client.post("/v1/jobs", headers=headers, json=body).json()
@@ -300,12 +301,11 @@ def test_legacy_unknown_usage_keeps_money_reservation_until_reconciled(settings,
 def test_usage_migration_is_conservative_and_only_runs_once(settings):
     store = Store(settings)
     store.initialize()
-    token, _ = store.create_session()
-    owner = store.authenticate(token)
+    owner, token = register_owner(store)
     jobs = []
     for index in range(2):
         request = JobRequest.model_validate({"idempotency_key": f"migration-usage-{index}", "messages": messages()})
-        job = store.create_job(owner, request)
+        job = registered_job(store, owner, token, request)
         store.claim_next()
         store.finish(job["id"], ProviderOutcome("completed", "synthetic", [], index * 10, 0, usage_known=True))
         jobs.append(job["id"])
@@ -323,10 +323,9 @@ def test_usage_migration_is_conservative_and_only_runs_once(settings):
 def test_old_queued_cost_flag_is_cleared_at_dispatch(settings):
     store = Store(settings)
     store.initialize()
-    token, _ = store.create_session()
-    owner = store.authenticate(token)
+    owner, token = register_owner(store)
     request = JobRequest.model_validate({"idempotency_key": "old-queued-flags-0001", "messages": messages()})
-    job = store.create_job(owner, request)
+    job = registered_job(store, owner, token, request)
     with store.connection(write=True) as db:
         db.execute("UPDATE jobs SET cost_known=1,usage_known=1 WHERE id=?", (job["id"],))
     claimed = store.claim_next()
