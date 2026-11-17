@@ -38,6 +38,15 @@ class MainActivity : ComponentActivity() {
                 incomingImport = incomingImports.pending,
                 onIncomingImportConfirmed = { incomingImports.confirm(it, controller) },
                 onIncomingImportConsumed = incomingImports::consume,
+                onShareLinkReceived = { text ->
+                    val previousId = incomingImports.pending?.id
+                    val error = incomingImports.receiveShare(text)
+                    showReceiveError(error)
+                    val pending = incomingImports.pending
+                    if (error == null && previousId == null && pending != null) {
+                        incomingImports.confirm(pending.id, controller)
+                    }
+                },
             )
         }
     }

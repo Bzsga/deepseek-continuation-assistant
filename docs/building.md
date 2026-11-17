@@ -1,6 +1,6 @@
 # 构建与安装
 
-源码版本见 `android/app/build.gradle.kts`。当前 Android 源码为 1.0.16 / versionCode 25，最低 Android 8.0（API 26），compile/target SDK 为 35。
+源码版本见 `android/app/build.gradle.kts`。当前 Android 源码为 1.0.18 / versionCode 27，最低 Android 8.0（API 26），compile/target SDK 为 35。
 
 ## Android 环境
 

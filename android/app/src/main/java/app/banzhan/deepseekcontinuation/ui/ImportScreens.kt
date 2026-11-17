@@ -35,6 +35,7 @@ internal fun HomeScreen(
     onRecord: (String) -> Unit,
     onBrowse: () -> Unit,
     onTasks: () -> Unit,
+    onShareLink: () -> Unit = {},
 ) {
     var otherWays by rememberSaveable { mutableStateOf(false) }
     val unfinished = state.tasks.filter { it.status in setOf("queued", "running", "paused") }
@@ -77,14 +78,23 @@ internal fun HomeScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        ActionRow {
                         Button(
+                            onClick = onShareLink,
+                            enabled = !state.busy,
+                        ) {
+                            Icon(Icons.Outlined.Link, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text("导入分享链接")
+                        }
+                        OutlinedButton(
                             onClick = onImport,
                             enabled = !state.busy,
-                            modifier = Modifier.fillMaxWidth(),
                         ) {
                             Icon(Icons.Outlined.FileUpload, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(7.dp))
                             Text("导入聊天文件")
+                        }
                         }
                         ActionRow {
                             TextButton(onClick = onGetRecords, enabled = !state.busy) {
@@ -96,7 +106,7 @@ internal fun HomeScreen(
                                 Text(if (otherWays) "收起其他方式" else "其他方式")
                             }
                         }
-                        Text("支持 ZIP、JSON，也可从浏览器直接分享过来。ZIP 不用解压。",
+                        Text("支持 DeepSeek 分享链接、ZIP 和 JSON，也可从其他应用分享过来。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (otherWays) ActionRow {

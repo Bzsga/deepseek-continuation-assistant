@@ -6,10 +6,13 @@ import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import app.banzhan.deepseekcontinuation.core.DeepSeekImporter
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.CompletableDeferred
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -26,6 +29,149 @@ class IncomingImportIntentTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val application = instrumentation.targetContext.applicationContext as Application
     private val uri = Uri.parse("content://synthetic.documents/exports/chat.zip")
+    private val shareUrl = "https://chat.deepseek.com/share/synthetic-share-123"
+
+    @Test
+    fun textSharingAndWebViewAcceptOnlyCanonicalDeepSeekShareLinks() {
+        val text = Intent(Intent.ACTION_SEND).setType("text/plain")
+            .putExtra(Intent.EXTRA_TEXT, "分享一段聊天：$shareUrl?utm_source=share")
+        assertEquals(shareUrl, parseIncomingImport(text)?.shareUrl)
+        assertNull(parseIncomingImport(text)?.uri)
+        val clip = Intent(Intent.ACTION_SEND).setType("text/plain").apply {
+            clipData = ClipData.newPlainText("分享", "《测试》 $shareUrl")
+        }
+        assertEquals(shareUrl, parseIncomingImport(clip)?.shareUrl)
+        assertEquals(shareUrl, parseIncomingImport(Intent(Intent.ACTION_VIEW).setData(Uri.parse(shareUrl)))?.shareUrl)
+        listOf("http://chat.deepseek.com/share/synthetic-share-123",
+            "https://chat.deepseek.com.evil.test/share/synthetic-share-123", "https://example.com/chat.zip").forEach {
+            assertNotNull(parseIncomingImport(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, it))?.error)
+        }
+    }
+
+    @Test
+    fun rejectedTextIsNeverSavedAndValidPasteDoesNotFetchUntilConfirmed() {
+        instrumentation.runOnMainSync {
+            val saved = SavedStateHandle()
+            var reads = 0
+            val viewModel = IncomingImportViewModel(application, saved) { reads++; syntheticShare() }
+            assertNotNull(viewModel.receiveShare("private-secret https://evil.test/share/123456"))
+            assertNull(viewModel.pending)
+            viewModel.receive(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "another-private-secret"))
+            assertEquals(IncomingImportStatus.FAILED, viewModel.pending?.status)
+            viewModel.consume(requireNotNull(viewModel.pending).id)
+            assertNull(viewModel.receiveShare("a-private-title $shareUrl"))
+            assertEquals(shareUrl, viewModel.pending?.shareUrl)
+            assertEquals(IncomingImportStatus.AWAITING_CONFIRMATION, viewModel.pending?.status)
+            assertEquals(0, reads)
+            assertFalse(saved.keys().map { saved.get<Any?>(it).toString() }.joinToString().contains("private"))
+        }
+    }
+
+    @Test
+    fun previewNeedsExplicitSaveAndRestoresWithoutBundledConversationBodies() {
+        val store = ViewModelStore()
+        try {
+            instrumentation.runOnMainSync {
+                val saved = SavedStateHandle()
+                val controller = AppController(application, "share-preview-${UUID.randomUUID()}.db")
+                val viewModel = IncomingImportViewModel(application, saved) { syntheticShare() }
+                store.put("controller", controller)
+                store.put("incoming", viewModel)
+                viewModel.receiveShare(shareUrl)
+                val id = requireNotNull(viewModel.pending).id
+                viewModel.confirm(id, controller)
+                assertEquals(IncomingImportStatus.PREVIEW, viewModel.pending?.status)
+                assertEquals("source-body-never-bundled", viewModel.pending?.preview?.conversations?.single()?.branches?.single()?.messages?.single()?.content)
+                assertTrue(controller.state.value.conversations.isEmpty())
+                assertFalse(saved.keys().map { saved.get<Any?>(it).toString() }.joinToString().contains("source-body-never-bundled"))
+                val restored = IncomingImportViewModel(application, copySavedState(saved)) { syntheticShare() }
+                assertEquals(id, restored.pending?.id)
+                assertEquals(IncomingImportStatus.AWAITING_CONFIRMATION, restored.pending?.status)
+                assertNull(restored.pending?.preview)
+                assertEquals(shareUrl, restored.pending?.shareUrl)
+            }
+        } finally {
+            instrumentation.runOnMainSync { store.clear() }
+        }
+    }
+
+    @Test
+    fun failedShareRetriesSameLinkOnlyAfterExplicitConfirmationAndStopsAtPreview() {
+        val store = ViewModelStore()
+        try {
+            instrumentation.runOnMainSync {
+                val saved = SavedStateHandle()
+                val controller = AppController(application, "share-retry-${UUID.randomUUID()}.db")
+                var reads = 0
+                val viewModel = IncomingImportViewModel(application, saved) { link ->
+                    assertEquals(shareUrl, link.url)
+                    reads++
+                    if (reads == 1) throw DeepSeekShareReadException("分享暂时无法访问，请稍后重试。")
+                    syntheticShare()
+                }
+                store.put("controller", controller)
+                store.put("incoming", viewModel)
+                viewModel.receiveShare(shareUrl)
+                val id = requireNotNull(viewModel.pending).id
+                assertEquals(0, reads)
+                viewModel.confirm(id, controller)
+                assertEquals(1, reads)
+                assertEquals(IncomingImportStatus.FAILED, viewModel.pending?.status)
+                assertEquals(id, viewModel.pending?.id)
+                assertEquals(shareUrl, viewModel.pending?.shareUrl)
+                assertNull(viewModel.pending?.preview)
+                assertTrue(controller.state.value.conversations.isEmpty())
+                val restored = IncomingImportViewModel(application, copySavedState(saved)) { syntheticShare() }
+                assertEquals(IncomingImportStatus.FAILED, restored.pending?.status)
+                assertEquals(shareUrl, restored.pending?.shareUrl)
+                // The failed receipt remains idle until the user presses “重试链接”.
+                assertEquals(1, reads)
+                viewModel.confirm(id, controller)
+                assertEquals(2, reads)
+                assertEquals(id, viewModel.pending?.id)
+                assertEquals(shareUrl, viewModel.pending?.shareUrl)
+                assertEquals(IncomingImportStatus.PREVIEW, viewModel.pending?.status)
+                assertNull(viewModel.pending?.error)
+                assertNotNull(viewModel.pending?.preview)
+                assertTrue(controller.state.value.conversations.isEmpty())
+            }
+        } finally {
+            instrumentation.runOnMainSync { store.clear() }
+        }
+    }
+
+    @Test
+    fun cancelledFetchCannotReplaceNextQueuedImport() {
+        val store = ViewModelStore()
+        val response = CompletableDeferred<DeepSeekShareDocument>()
+        try {
+            instrumentation.runOnMainSync {
+                val saved = SavedStateHandle()
+                val controller = AppController(application, "share-cancel-${UUID.randomUUID()}.db")
+                val viewModel = IncomingImportViewModel(application, saved) { response.await() }
+                store.put("controller", controller)
+                store.put("incoming", viewModel)
+                viewModel.receiveShare(shareUrl)
+                val firstId = requireNotNull(viewModel.pending).id
+                viewModel.confirm(firstId, controller)
+                assertEquals(IncomingImportStatus.FETCHING, viewModel.pending?.status)
+                val restored = IncomingImportViewModel(application, copySavedState(saved)) { syntheticShare() }
+                assertEquals(IncomingImportStatus.AWAITING_CONFIRMATION, restored.pending?.status)
+                viewModel.receive(shareIntent())
+                viewModel.consume(firstId)
+                val nextId = requireNotNull(viewModel.pending).id
+                response.complete(syntheticShare())
+                assertNotEquals(firstId, nextId)
+                assertEquals(nextId, viewModel.pending?.id)
+                assertEquals(IncomingImportStatus.AWAITING_CONFIRMATION, viewModel.pending?.status)
+                assertNull(viewModel.pending?.shareUrl)
+                assertNull(viewModel.pending?.preview)
+            }
+            instrumentation.waitForIdleSync()
+        } finally {
+            instrumentation.runOnMainSync { store.clear() }
+        }
+    }
 
     @Test
     fun sendReadsAStreamOrSingleClipUriAndIgnoresExecutableText() {
@@ -131,6 +277,11 @@ class IncomingImportIntentTest {
     }
 
     private fun shareIntent() = Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM, uri)
+
+    private fun syntheticShare(): DeepSeekShareDocument {
+        val bytes = """{"id":"synthetic-share-preview","title":"合成分享","messages":[{"id":"m1","role":"user","content":"source-body-never-bundled"}]}""".toByteArray()
+        return DeepSeekShareDocument(DeepSeekImporter.parse(bytes, "synthetic.json"), bytes)
+    }
 
     private fun copySavedState(source: SavedStateHandle) = SavedStateHandle(source.keys().associateWith { source.get<Any?>(it) })
 }

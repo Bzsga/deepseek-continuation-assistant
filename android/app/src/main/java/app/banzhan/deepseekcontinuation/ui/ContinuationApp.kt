@@ -57,6 +57,7 @@ fun ContinuationApp(
     incomingImport: PendingIncomingImport? = null,
     onIncomingImportConfirmed: (String) -> Unit = {},
     onIncomingImportConsumed: (String) -> Unit = {},
+    onShareLinkReceived: (String) -> Unit = {},
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
     val politicalState by controller.politicalExport.state.collectAsStateWithLifecycle()
@@ -95,6 +96,7 @@ fun ContinuationApp(
     var reorganizationError by remember { mutableStateOf<String?>(null) }
     var restoreConfirmation by remember { mutableStateOf(false) }
     var getRecordsVisible by rememberSaveable { mutableStateOf(false) }
+    var shareInputVisible by rememberSaveable { mutableStateOf(false) }
     var installPreparing by remember { mutableStateOf(false) }
     var permissionPendingVersion by rememberSaveable { mutableStateOf<Int?>(null) }
     var permissionLaunchResumeTick by rememberSaveable { mutableIntStateOf(-1) }
@@ -403,11 +405,12 @@ fun ContinuationApp(
         }
     }
     val import: () -> Unit = { launchImport() }
+    val fetchingSharedLink = incomingImport?.status == IncomingImportStatus.FETCHING
     val importingSharedFile = incomingImport?.status == IncomingImportStatus.IMPORTING
-    val busy = state.busy || submitting || reorganizationLoading || importingSharedFile || installPreparing
+    val busy = state.busy || submitting || reorganizationLoading || importingSharedFile || fetchingSharedLink || installPreparing
     val politicalRunning = politicalState.task?.status in setOf("queued", "running")
     val existingModal = aiRequest != null || exportArchive != null || politicalArchiveId != null ||
-        quickArchive != null || repairArchiveId != null || restoreConfirmation || reorganizationPlan != null || reorganizationLoading
+        quickArchive != null || repairArchiveId != null || restoreConfirmation || reorganizationPlan != null || reorganizationLoading || shareInputVisible
     val incomingBlocked =
         busy || existingModal || politicalRunning || state.tasks.any { it.status in setOf("queued", "running") }
     fun installationBlocker(): String? {
@@ -423,7 +426,7 @@ fun ContinuationApp(
                 quickArchive != null || repairArchiveId != null ||
                 reorganizationPlan != null ||
                 restoreConfirmation ||
-                getRecordsVisible -> "请先完成当前页面操作，再安装更新。"
+                getRecordsVisible || shareInputVisible -> "请先完成当前页面操作，再安装更新。"
             route !in setOf("home", "archives", "settings", "about") -> "回到首页或关于页后可安装更新。"
             !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) ->
                 "回到应用后可继续安装。"
@@ -488,7 +491,7 @@ fun ContinuationApp(
         val pending = incomingImport ?: return@LaunchedEffect
         when (pending.status) {
             IncomingImportStatus.AWAITING_CONFIRMATION ->
-                if (route == "home" && !incomingBlocked) onIncomingImportConfirmed(pending.id)
+                if (pending.shareUrl == null && route == "home" && !incomingBlocked) onIncomingImportConfirmed(pending.id)
             IncomingImportStatus.COMPLETED -> {
                 imported(pending.conversationIds)
                 onIncomingImportConsumed(pending.id)
@@ -600,6 +603,7 @@ fun ContinuationApp(
                     ?.let { pending ->
                         IncomingImportBar(
                             pending.fileName,
+                            isShareLink = pending.shareUrl != null,
                             blocked = incomingBlocked,
                             onImport = { onIncomingImportConfirmed(pending.id) },
                             onCancel = { onIncomingImportConsumed(pending.id) },
@@ -637,6 +641,7 @@ fun ContinuationApp(
                                     { openRecord(it) },
                                     { imported(state.conversations.map { it.id }) },
                                     { route = "tasks" },
+                                    onShareLink = { if (!busy && incomingImport == null) shareInputVisible = true },
                                 )
                             "choose" ->
                                 ConversationPickerScreen(
@@ -1181,10 +1186,28 @@ fun ContinuationApp(
                 }
             }
         }
-        if (importingSharedFile)
+        if (shareInputVisible) ShareLinkInputDialog(
+            onDismiss = { shareInputVisible = false },
+            onRead = { link ->
+                shareInputVisible = false
+                importTargetArchiveId = null
+                onShareLinkReceived(link)
+            },
+        )
+        incomingImport?.takeIf { it.status == IncomingImportStatus.PREVIEW && !existingModal }?.let { pending ->
+            pending.preview?.let { preview ->
+                ShareImportPreviewDialog(
+                    preview,
+                    blocked = incomingBlocked,
+                    onSave = { onIncomingImportConfirmed(pending.id) },
+                    onDismiss = { onIncomingImportConsumed(pending.id) },
+                )
+            }
+        }
+        if (importingSharedFile || fetchingSharedLink)
             AlertDialog(
                 onDismissRequest = {},
-                title = { Text("正在导入聊天") },
+                title = { Text(if (fetchingSharedLink) "正在读取分享" else "正在导入聊天") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(incomingImport?.fileName.orEmpty(), maxLines = 3)
@@ -1192,29 +1215,23 @@ fun ContinuationApp(
                     }
                 },
                 confirmButton = {},
+                dismissButton = {
+                    if (fetchingSharedLink) TextButton(onClick = { incomingImport?.let { onIncomingImportConsumed(it.id) } }) { Text("取消") }
+                },
             )
         incomingImport
             ?.takeIf { it.status == IncomingImportStatus.FAILED && !existingModal }
             ?.let { pending ->
-                AlertDialog(
-                    onDismissRequest = { onIncomingImportConsumed(pending.id) },
-                    title = { Text("这次没有导入") },
-                    text = { Text(pending.error ?: "请重新分享聊天 ZIP，或在下载目录选择文件。") },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                onIncomingImportConsumed(pending.id)
-                                import()
-                            }
-                        ) {
-                            Text("重新选择文件")
-                        }
+                IncomingImportFailureDialog(
+                    error = pending.error,
+                    isShareLink = pending.shareUrl != null,
+                    blocked = incomingBlocked,
+                    onRetry = { onIncomingImportConfirmed(pending.id) },
+                    onChooseFile = {
+                        onIncomingImportConsumed(pending.id)
+                        import()
                     },
-                    dismissButton = {
-                        TextButton(onClick = { onIncomingImportConsumed(pending.id) }) {
-                            Text("关闭")
-                        }
-                    },
+                    onDismiss = { onIncomingImportConsumed(pending.id) },
                 )
             }
         if (restoreConfirmation)
@@ -1244,21 +1261,23 @@ fun ContinuationApp(
 @Composable
 private fun IncomingImportBar(
     fileName: String,
+    isShareLink: Boolean = false,
     blocked: Boolean,
     onImport: () -> Unit,
     onCancel: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("收到聊天文件", fontWeight = FontWeight.SemiBold)
+            Text(if (isShareLink) "收到 DeepSeek 分享链接" else "收到聊天文件", fontWeight = FontWeight.SemiBold)
             Text(
                 fileName,
                 maxLines = 2,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
+            if (isShareLink) Text("读取公开分享并预览，确认后才保存。持有链接的人也能查看分享内容。", style = MaterialTheme.typography.bodySmall)
             if (blocked) Text("当前操作完成后可继续导入。", style = MaterialTheme.typography.bodySmall)
             ActionRow {
-                Button(onClick = onImport, enabled = !blocked) { Text("导入") }
+                Button(onClick = onImport, enabled = !blocked) { Text(if (isShareLink) "读取链接" else "导入") }
                 TextButton(onClick = onCancel) { Text("取消") }
             }
         }

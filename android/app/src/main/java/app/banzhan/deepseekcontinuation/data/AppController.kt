@@ -18,6 +18,8 @@ import app.banzhan.deepseekcontinuation.core.ChatMessage
 import app.banzhan.deepseekcontinuation.core.ContinuityLogic
 import app.banzhan.deepseekcontinuation.core.ContinuitySettings
 import app.banzhan.deepseekcontinuation.core.DeepSeekImporter
+import app.banzhan.deepseekcontinuation.core.DeepSeekShareLink
+import app.banzhan.deepseekcontinuation.core.ImportResult
 import app.banzhan.deepseekcontinuation.core.EntryConflict
 import app.banzhan.deepseekcontinuation.core.ImportedConversation
 import app.banzhan.deepseekcontinuation.core.IncrementalContinuity
@@ -154,12 +156,18 @@ class AppController internal constructor(application: Application, databaseName:
 
     fun clearNotice() = mutableState.update { it.copy(notice = null) }
 
-    suspend fun importFile(bytes: ByteArray, fileName: String): List<String> = operation {
+    suspend fun importFile(bytes: ByteArray, fileName: String): List<String> =
+        importSource(bytes, fileName) { DeepSeekImporter.parse(bytes, fileName) }
+
+    suspend fun importShare(document: DeepSeekShareDocument, link: DeepSeekShareLink): List<String> =
+        importSource(document.bytes, "DeepSeek分享-${link.id}.json") { document.result }
+
+    private suspend fun importSource(bytes: ByteArray, fileName: String, parse: () -> ImportResult): List<String> = operation {
         val startedAt = System.nanoTime()
         try {
             require(fileName.isNotBlank() && fileName.length <= 1024) { "导入文件名无效或过长" }
             DiagnosticLog.record("import", "parse", mapOf("input_bytes" to bytes.size.toLong()))
-            val result = DeepSeekImporter.parse(bytes, fileName)
+            val result = parse()
             DiagnosticLog.record("import", "save", mapOf("conversation_count" to result.conversations.size.toLong(),
                 "message_count" to result.conversations.sumOf { conversation -> conversation.branches.sumOf { it.messages.size.toLong() } }))
             mutex.withLock {
